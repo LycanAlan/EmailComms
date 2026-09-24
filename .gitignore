@@ -1,0 +1,12 @@
+# organiser data + problem statement (large / not ours to redistribute)
+6ab10eb3b23ba_student_resource/
+*.pdf
+
+# generated artefacts (candidate_pairs.tsv alone is > GitHub's 100 MB limit)
+output/
+*.parquet
+*.zip
+
+__pycache__/
+.DS_Store
+__MACOSX/

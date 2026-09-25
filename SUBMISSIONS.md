@@ -15,7 +15,7 @@ our own validation split.
 | # | date | uploaded by | file | sha256 (first 16) | code commit | rule | validation F0.5 | public LB F0.5 | notes |
 |---|------|-------------|------|-------------------|-------------|------|-----------------|----------------|-------|
 | 1 | 2026-09-25 14:28 IST | LycanAlan | matching_results.tsv | 486d3f430b1680f4 | 06b7ebd | threshold 0.725 | 0.9688 | 0.9570 | first full run |
-| 2 | 2026-09-25 20:22 IST | LycanAlan | 1_v2_main/matching_results.tsv | 04fc9f0cdbab81fd | 0e3e243 | threshold 0.675, margin 0.4 | 0.9747 (India 0.9618, US 0.9832) | 0.964 | v2: generator fingerprints, name ambiguity, runner-up margins (Ragh234) |
+| 2 | 2026-09-25 20:21 IST | LycanAlan | 1_v2_main/matching_results.tsv | 04fc9f0cdbab81fd | 0e3e243 | threshold 0.675, margin 0.4 | 0.9747 (India 0.9618, US 0.9832) | 0.963678 | v2: generator fingerprints, name ambiguity, runner-up margins (Ragh234) |
 
 Upload tip (Windows): if the portal hangs at "Please Wait 0" / Bad Request, Windows has no
 MIME type for `.tsv`. Fix once per user, then fully restart the browser:

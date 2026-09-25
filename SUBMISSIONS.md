@@ -16,6 +16,7 @@ our own validation split.
 |---|------|-------------|------|-------------------|-------------|------|-----------------|----------------|-------|
 | 1 | 2026-09-25 14:28 IST | LycanAlan | matching_results.tsv | 486d3f430b1680f4 | 06b7ebd | threshold 0.725 | 0.9688 | 0.9570 | first full run |
 | 2 | 2026-09-25 20:21 IST | LycanAlan | 1_v2_main/matching_results.tsv | 04fc9f0cdbab81fd | 0e3e243 | threshold 0.675, margin 0.4 | 0.9747 (India 0.9618, US 0.9832) | 0.963678 | v2: generator fingerprints, name ambiguity, runner-up margins (Ragh234) |
+| 3 | 2026-09-25 20:3x IST | LycanAlan | 5_v2_diag_noFrance/matching_results.tsv | 2f1c4a7bcbe39543 | 0e3e243 | sub 2 with France rows emptied | - | 0.833986 | diagnostic: France = 0.0558 + (0.963678 - 0.833986) / 0.1498 = **0.922**; US+India on test = 0.971 vs 0.971 on validation |
 
 Upload tip (Windows): if the portal hangs at "Please Wait 0" / Bad Request, Windows has no
 MIME type for `.tsv`. Fix once per user, then fully restart the browser:
@@ -27,3 +28,11 @@ If test US/India behave like validation, France would be ~0.90 on the public spl
 that is an inference, not a measurement: the model's confidence profile on France test
 pairs is the same as on US (52% of records matched at p>=0.99, same uncertain band).
 A France-blanked diagnostic submission would measure it directly.
+
+Reading sub 3 (France-blanked copy of sub 2): emptying a country's rows turns each of its S1
+scores into 1 if the S1 has no true match, else 0. So LB(sub 2) - LB(sub 3) = w * (F_France - s),
+with w = 0.1498 (France share of test S1) and s = 0.0558 (share of S1 with no match: 0.0558 in
+both train countries, and v2 predicts 0.0568 empty for France). France scores **0.922**; US+India
+together score 0.971 on test, the same as our validation predicts for that mix (0.971). Our
+validation is trustworthy for US/India, and France is the whole leaderboard gap. To reach 0.98+
+both need work: France 0.92 -> 0.97 is worth +0.0075, US+India 0.971 -> 0.985 is worth +0.012.

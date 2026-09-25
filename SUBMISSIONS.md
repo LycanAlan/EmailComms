@@ -19,5 +19,8 @@ MIME type for `.tsv`. Fix once per user, then fully restart the browser:
 `reg add "HKCU\Software\Classes\.tsv" /v "Content Type" /t REG_SZ /d "text/tab-separated-values" /f`
 
 Reading sub 1: test is 46.8% India / 38.3% US / 15.0% France (S1). Re-weighting our
-per-country validation (US 0.9793, India 0.9529) to that mix gives ~0.965 for US+India,
-which puts France at roughly 0.90 on the public split. France is the main gap.
+per-country validation (US 0.9793, India 0.9529) to that mix gives ~0.965 for US+India.
+If test US/India behave like validation, France would be ~0.90 on the public split, but
+that is an inference, not a measurement: the model's confidence profile on France test
+pairs is the same as on US (52% of records matched at p>=0.99, same uncertain band).
+A France-blanked diagnostic submission would measure it directly.

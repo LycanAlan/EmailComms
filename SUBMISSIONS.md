@@ -16,7 +16,8 @@ our own validation split.
 |---|------|-------------|------|-------------------|-------------|------|-----------------|----------------|-------|
 | 1 | 2026-09-25 14:28 IST | LycanAlan | matching_results.tsv | 486d3f430b1680f4 | 06b7ebd | threshold 0.725 | 0.9688 | 0.9570 | first full run |
 | 2 | 2026-09-25 20:21 IST | LycanAlan | 1_v2_main/matching_results.tsv | 04fc9f0cdbab81fd | 0e3e243 | threshold 0.675, margin 0.4 | 0.9747 (India 0.9618, US 0.9832) | 0.963678 | v2: generator fingerprints, name ambiguity, runner-up margins (Ragh234) |
-| 3 | 2026-09-25 20:3x IST | LycanAlan | 5_v2_diag_noFrance/matching_results.tsv | 2f1c4a7bcbe39543 | 0e3e243 | sub 2 with France rows emptied | - | 0.833986 | diagnostic: France = 0.0558 + (0.963678 - 0.833986) / 0.1498 = **0.922**; US+India on test = 0.971 vs 0.971 on validation |
+| 3 | 2026-09-25 20:31 IST | LycanAlan | 5_v2_diag_noFrance/matching_results.tsv | 2f1c4a7bcbe39543 | 0e3e243 | sub 2 with France rows emptied | - | 0.833986 | diagnostic: France = 0.0558 + (0.963678 - 0.833986) / 0.1498 = **0.922**; US+India on test = 0.971 vs 0.971 on validation |
+| 4 | 2026-09-25 20:35 IST | LycanAlan | 2_v2_France0.85/matching_results.tsv | b8cbeb49da42e7db | 0e3e243 | threshold 0.675, margin 0.4; France 0.85 | - | 0.963831 | probe: France stricter, +0.000153 vs sub 2 = +0.0010 on France alone |
 
 Upload tip (Windows): if the portal hangs at "Please Wait 0" / Bad Request, Windows has no
 MIME type for `.tsv`. Fix once per user, then fully restart the browser:

@@ -24,7 +24,7 @@ RX = {  # RE2 patterns on the RAW strings, run in Arrow's C++ layer
     "url": ("name", r"(?i)www\.|https?://|\.(com|net|org|in|fr|co)\b"),
     "ncaps": ("name", r"^[^a-z]*[A-Z][^a-z]*$"),
     "nlower": ("name", r"^[^A-Z]*[a-z][^A-Z]*$"),
-    "leet": ("name", r"[A-Za-z][013457][A-Za-z]"),
+    "leet": ("name", r"[A-Za-z][0-9][A-Za-z]|\b[0-9][A-Za-z]{3,}\b|\b[A-Za-z]{3,}[0-9]\b"),   # inner or edge digit: 5ervices, denta1
     "accent": ("name", r"[\x{00C0}-\x{024F}]"),
     "nlead": ("name", r"^\W"),
     "idtag": ("name", r"(?i)\bid\s*[:#]?\s*\d"),

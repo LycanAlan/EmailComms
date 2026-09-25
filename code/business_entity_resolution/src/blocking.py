@@ -34,13 +34,21 @@ HV = HashingVectorizer(token_pattern=r"\S+", ngram_range=(1, 2), n_features=2 **
                        alternate_sign=False, norm=None, dtype=np.float32)
 
 
+HV1 = HashingVectorizer(token_pattern=r"\S+", ngram_range=(1, 1), n_features=2 ** 24,   # keys: no bigrams, their order is arbitrary
+                        alternate_sign=False, norm=None, dtype=np.float32)
+
+
 def _hash(texts):
     return HV.transform(texts)
 
 
-def hashed_counts(texts, pool):
+def _hash_keys(texts):
+    return HV1.transform(texts)
+
+
+def hashed_counts(texts, pool, fn=_hash):
     chunks = [texts[s:s + 200_000] for s in range(0, len(texts), 200_000)]
-    return sp.vstack(pool.map(_hash, chunks)).tocsr()
+    return sp.vstack(pool.map(fn, chunks)).tocsr()
 
 
 def tfidf(X):
@@ -51,7 +59,8 @@ def prune_common(X, max_df_frac):
     """Drop very common columns from the *query* side. They barely move a
     cosine score but dominate the cost of the sparse product."""
     df = np.bincount(X.indices, minlength=X.shape[1])
-    Y = (X @ sp.diags((df <= max_df_frac * X.shape[0]).astype(np.float32))).tocsr()
+    keep = df <= max(max_df_frac * X.shape[0], 50)                 # floor: a small country must keep its terms
+    Y = (X @ sp.diags(keep.astype(np.float32))).tocsr()
     Y.eliminate_zeros()
     return Y
 
@@ -89,20 +98,23 @@ def unmatched_mass(X, a, b, chunk=2_000_000):
     return out
 
 
-def combo_keys(phon, nums, addr):
+def combo_keys(phon, nums):
     """'house number x name sound' keys: '79_sftvr' = number 79 + skeleton of 'software'.
     Kannada 'saaphttveer' and English 'software' share the skeleton, so the key links a
-    transliterated record to its S1 even when the words differ, and a number+name pair is rare.
-    Plus 'house number x address word' keys: '27@montesquieu'. A French street holds ~14
-    businesses and house numbers repeat, so '27' and the street words alone are too common to
-    survive query pruning: 23% of France's same-address, different-name copies were never
-    retrieved (US/India: 0%). Joined to the number they are rare, whatever the name says."""
-    return [" ".join([f"{n}_{p}" for n in ns.split() for p in ps.split()] +
-                     [f"{n}@{w}" for n in ns.split() for w in a.split() if not w.isdigit()])
-            for ps, ns, a in zip(phon, nums, addr)]
+    transliterated record to its S1 even when the words differ, and a number+name pair is rare."""
+    return [" ".join(f"{n}_{p}" for n in ns.split() for p in ps.split()) for ps, ns in zip(phon, nums)]
 
 
-def block_country(d, k_rev, k_fwd, prune, pool, k_combo=3):
+def addr_keys(addr, nums):
+    """'house number x address word' keys: '27@montesquieu'. A French street holds ~14 businesses
+    and house numbers repeat, so '27' and the street words alone are too common to survive query
+    pruning: 23% of France's same-address, different-name copies were never retrieved (US/India:
+    0%). Joined to the number they are rare, whatever the name says. Own channel, so these keys
+    never crowd the name-sound keys out of the combo top-k (India has ~4x more of them)."""
+    return [" ".join(f"{n}@{w}" for n in ns.split() for w in a.split() if not w.isdigit()) for a, ns in zip(addr, nums)]
+
+
+def block_country(d, k_rev, k_fwd, prune, pool, k_combo=3, k_ak=1):
     """d: normalised records of ONE country (all sources). Returns candidate
     pairs (q = S1 position, i = S2/S3 position in d) with TF-IDF features."""
     t = time.time()
@@ -110,9 +122,13 @@ def block_country(d, k_rev, k_fwd, prune, pool, k_combo=3):
     s1, pl = np.flatnonzero(src == 1), np.flatnonzero(src != 1)
     if not len(s1) or not len(pl):
         return None
-    K = tfidf(hashed_counts(combo_keys(d.phon.tolist(), d.nums.tolist(), d.addr.tolist()), pool))
+    A = tfidf(hashed_counts(addr_keys(d.addr.tolist(), d.nums.tolist()), pool, _hash_keys))
+    q, i, r = topk(prune_common(A[pl], prune), A[s1], k_ak)
+    parts = [pd.DataFrame({"q": s1[i], "i": pl[q], "rank_ak": r})]
+    del A
+    K = tfidf(hashed_counts(combo_keys(d.phon.tolist(), d.nums.tolist()), pool, _hash_keys))
     q, i, r = topk(prune_common(K[pl], prune), K[s1], k_combo)
-    parts = [pd.DataFrame({"q": s1[i], "i": pl[q], "rank_combo": r})]
+    parts.append(pd.DataFrame({"q": s1[i], "i": pl[q], "rank_combo": r}))
 
     names = (d.core + " " + d.alt).str.strip().tolist()
     addrs = [" ".join("@" + w for w in s.split()) for s in d.addr.tolist()]   # "@": address terms never collide with name terms
@@ -132,6 +148,7 @@ def block_country(d, k_rev, k_fwd, prune, pool, k_combo=3):
     c["rank_rev"] = c.rank_rev.fillna(k_rev + 1)                   # k+1 = "not retrieved this way"
     c["rank_fwd"] = c.rank_fwd.fillna(k_fwd + 1)
     c["rank_combo"] = c.rank_combo.fillna(k_combo + 1)
+    c["rank_ak"] = c.rank_ak.fillna(k_ak + 1)
     q, i = c.q.to_numpy(), c.i.to_numpy()
     c["src"] = src[i].astype(np.int8)
     c["cos_k"] = rowdot(K, q, i)

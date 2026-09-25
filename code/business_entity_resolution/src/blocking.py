@@ -158,6 +158,7 @@ def block_country(d, k_rev, k_fwd, prune, pool, k_combo=3, k_ak=1):
     c["cos_aw"] = rowdot(Aw, q, i)
     c["unm_a"] = unmatched_mass(Nw, q, i)
     c["unm_b"] = unmatched_mass(Nw, i, q)
+    del W, Nw, Aw, Wq                                               # free the matrices before the pandas-heavy part
     add_context(c)
     print(f"    {len(s1):,} S1 x {len(pl):,} S2/S3 -> {len(c):,} pairs "
           f"({len(c) / len(s1):.1f}/S1) in {time.time() - t:.0f}s", flush=True)
@@ -173,7 +174,7 @@ def add_context(c):
         r = c.groupby("i")[col]
         c[f"{col}_rgap"] = r.transform("max") - c[col]             # distance to the candidate's best S1
     c["n_s1_for_i"] = c.groupby("i").q.transform("size").astype(np.float32)
-    c["n_high"] = c.assign(h=c.cos_w > 0.5).groupby(["q", "src"]).h.transform("sum").astype(np.float32)
+    c["n_high"] = (c.cos_w > 0.5).groupby([c.q, c.src]).transform("sum").astype(np.float32)   # no frame copy (OOM at 45M rows)
     add_margins(c)
 
 

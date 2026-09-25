@@ -11,12 +11,13 @@
 We resolve business entities across three noisy sources with a blocking + classifier
 pipeline: normalise text, retrieve a short candidate list per Source 1 entity with
 hashed TF-IDF cosine similarity (blocking), score every candidate pair with a
-LightGBM model trained on similarity features, then pick how many candidates to keep
-per entity with a rule tuned directly against the macro F0.5 metric instead of a
-fixed probability threshold. The pipeline is country-agnostic by construction (no
+LightGBM model trained on similarity features, give each Source 2/3 record to at
+most one Source 1 entity, and keep the pairs whose probability clears a cutoff
+chosen by measuring the exact macro F0.5 metric on held-out entities. The pipeline is country-agnostic by construction (no
 country feature is ever passed to the model), which is what lets it handle France in
 the test set despite having zero French training examples. On a held-out validation
-split of training S1 entities, this reaches a macro F0.5 of {{VAL_F05}}.
+split of training S1 entities, this reaches a macro F0.5 of 0.9688
+(US 0.9793, India 0.9529).
 
 ## 2. Methodology
 
@@ -84,12 +85,15 @@ defaults:
 - Blocking runs in two directions (each Source 2/3 record retrieves its own best
   Source 1 candidates, in addition to the usual Source 1 to pool direction) because
   the one-owner structure of the data makes the reverse direction unusually precise.
-- The final decision rule does not threshold probabilities at a fixed cutoff. It
-  computes the expected F0.5 of keeping the top k candidates for each Source 1
-  entity, for every k including 0 (predict singleton), and keeps whichever k
-  maximises that expected score, choosing between this rule and a plain threshold by
-  whichever actually scores higher on held-out validation entities under the exact
-  competition formula.
+- The decision rule is chosen by the metric, not by convention. After one-owner
+  assignment, two rule families compete on held-out entities under the exact
+  competition formula: a plain probability threshold (grid 0.20 to 0.95) and an
+  expected-F0.5 top-k rule that scores every cutoff k, including k = 0 (predict
+  singleton). The plain threshold at 0.725 won by a small margin, so the simpler
+  rule ships.
+- Validation reproduces test conditions: before measuring, the model scores every
+  training pair of all 2.21M Source 1 entities, so the one-owner competition is as
+  crowded as it will be on the test set.
 - No feature ever encodes country directly, so the same trained model applies to
   France without modification.
 
@@ -129,16 +133,20 @@ measured directly against known true pairs before settling on the final one:
 - A name-only character-trigram pass was tried as a cheap first filter but was weak
   specifically in the reverse direction (rank-1 recall only about 38%) and was
   dropped rather than layered in.
-- Word unigram+bigram hashed TF-IDF ran about 3.5x faster than character n-grams at
-  the same recall, which is why it is the final representation.
+- Adding word bigrams (hashed unigram+bigram TF-IDF) ran about 3.5x faster than
+  word unigrams alone at the same recall: rare bigrams such as "12029 sheraton" let
+  the search drop common unigrams far more aggressively. This is the final
+  representation.
 - **Final configuration:** reverse top-3 unioned with forward top-10 per source,
   query-side pruning at document frequency > 0.2%. Measured recall: 97.9% of true
   pairs survive on a US sample, at about 20 candidates per Source 1 entity. Recall
-  on the full training run (all countries, this exact configuration): **{{BLOCK_RECALL}}**.
+  on the full training run (all countries, this exact configuration):
+  **96.65%** of true train pairs survive blocking, at **56.19M** candidate pairs for
+  the 2.21M train Source 1 entities (25.5 candidates per Source 1 entity).
 
 **Candidate pairs generated.** Total candidate pairs on the test set (the exact set
 handed to the matching model, and what is written to `candidate_pairs.tsv`):
-**{{N_CAND_PAIRS_TEST}}**.
+**48,053,510** (US 18.13M, India 22.31M, France 7.62M; 27.7 per Source 1 entity).
 
 Each candidate pair also carries "context" features computed during blocking
 (cosine similarity on the combined/name-only/address-only vectors, each candidate's
@@ -180,9 +188,45 @@ MIT-licensed and, as a tree ensemble rather than a parameter-counted neural netw
 trivially satisfies the challenge's "MIT/Apache-2.0, ≤8B parameters" model
 constraint.
 
-Training uses 300,000 Source 1 entities' worth of candidate pairs (`--train-s1`,
-default) with 100,000 held out for validation (`--valid-s1`). The top features by
-gain on this run: **{{TOP_FEATURES}}**.
+Training uses candidate pairs from a sample of Source 1 entities (`--train-s1` +
+`--valid-s1`, split three ways, see Validation protocol below). Top features by
+share of gain on this run: `cos_w_rgap` 44.7%, `rank_rev` 14.5%,
+`cos_w` 10.8%, `num_logdiff` 5.2%, `num_near` 2.6%, `a_tset` 2.6%, `cos_nw_rgap`
+2.3%, `n_jw` 2.0%, `num_jacc` 1.4%, `n_phon` 1.4%. The single dominant feature,
+`cos_w_rgap` (how far this Source 1 entity trails the candidate's best-matching
+Source 1 entity in combined-vector cosine similarity), is a blocking-stage
+"reverse competition" signal: it directly encodes the one-owner intuition from
+Section 2.1 that a real match is usually the *best* claim on a Source 2/3 record,
+not just *a* plausible one. `rank_rev` (this candidate's rank among the Source 1
+entities that retrieved it in the reverse blocking direction) reinforces the same
+idea. Name, address, and number features matter but individually carry much less
+weight than these two competition-based context features.
+
+### Validation protocol
+
+Getting an honest validation number required more care than a single train/test
+split. The sampled Source 1 entities (`--train-s1` 300,000 + `--valid-s1` 100,000,
+fixed random seed) are split three ways: 300,000 fit the LightGBM model, 50,000
+early-stop it (LightGBM's own `valid_sets`), and the remaining 50,000 are held back
+untouched to choose the decision rule and report the score below.
+
+Before scoring those final 50,000 entities, the trained model scores every
+candidate pair for all 2.21M train Source 1 entities, not only the sampled ones,
+and the one-owner assignment (Section "Decision rule" below) runs over that full
+scored set. This matters because one-owner assignment is a competition between
+Source 1 entities for a shared Source 2/3 record, and on the test set a sampled
+entity's candidate competes against every other test Source 1 entity, sampled or
+not. Scoring only the sampled 400,000 entities and running one-owner on that
+subset would let a held-out entity keep a record that an unsampled entity would
+actually have won on the full set, silently inflating the validation score. A first
+run without this correction scored 0.9689 against 0.9688 with it: the bias was
+small here, but the corrected number is the one reported in Section 5.
+
+This is also why the model code separates the old single decision function into
+two pieces: `matcher.one_owner()` runs once over the full scored set (all 2.21M
+Source 1 entities), and `matcher.select(rule)` then applies a chosen decision rule
+afterward, cheaply enough per Source 1 entity to try several candidate rules
+without re-scoring anything.
 
 ### Decision rule
 
@@ -216,14 +260,20 @@ scored with the true competition formula on the held-out validation Source 1
 entities, and whichever rule wins is the one saved and used unchanged at test time.
 
 **Threshold selection method:** grid search over a fixed-threshold rule (`t` from
-0.20 to 0.95) and the expected-F0.5 top-k rule (with a probability floor of 0.0 to
-0.5 below which a candidate is never kept, regardless of the expected-F0.5
-calculation), selecting whichever configuration scores best on 100,000 held-out
-validation Source 1 entities under the exact macro F0.5 formula. Chosen rule for
-this submission: **{{THRESHOLD_RULE}}**. Oracle ceiling (macro F0.5 if every true
-candidate that survived blocking were labelled perfectly): **{{CEILING_F05}}**; the
-gap between this ceiling and the achieved score attributes loss to the classifier
-and decision rule rather than to blocking recall.
+0.20 to 0.95, step 0.025) and the expected-F0.5 top-k rule (with a probability
+floor of 0.0 to 0.5 below which a candidate is never kept, regardless of the
+expected-F0.5 calculation), selecting whichever configuration scores best on the
+50,000-entity tune set (see Validation protocol above) under the exact macro F0.5
+formula. Chosen rule for this submission: a **plain probability
+threshold at p ≥ 0.725**, applied after one-owner assignment. The curve was flat:
+every threshold between 0.60 and 0.80 scored 0.968-0.9688, and the expected-F0.5
+top-k rule scored 0.9678-0.9680 across its floor settings, consistently a little
+below the plain threshold, so the simpler rule was kept rather than the more
+elaborate one. Oracle ceiling on the tune set (macro F0.5 if every true candidate
+that survived blocking were labelled perfectly): **0.9876**. The
+gap from 1.0 to this ceiling is entirely blocking recall on this set; the further
+gap from the ceiling down to the achieved 0.9688 is what the classifier and
+decision rule leave on the table.
 
 ### Handling France with no training data
 
@@ -251,30 +301,56 @@ design choices make this workable without any France-specific code path:
 Because of this, the only training-data dependency for France is the LightGBM
 model's learned feature-to-probability mapping (e.g. "high name similarity plus
 address-number agreement usually means a match"), which is a hypothesis that
-generic string-similarity patterns transfer across countries. See the "France
-sanity checks" idea in the code README for how we plan to validate this once
-predictions are available.
+generic string-similarity patterns transfer across countries. `pipeline.py`'s
+`write_submission()` now logs, on every `predict`/`select` run, the predicted
+singleton rate and mean matches per Source 1 entity broken down by country
+specifically so this hypothesis can be sanity-checked against the US/India numbers
+without labels; see the code README's "Next iteration ideas" for turning that log
+line into an automatic check instead of a manual read.
 
 ---
 
 ## 5. Results & Error Analysis
 
-- **F_0.5 Score (macro), validation:** {{VAL_F05}} (on 100,000 held-out training
-  Source 1 entities, US + India only, using the tuned rule above)
-- **Blocking recall ceiling on the same validation entities:** {{CEILING_F05}}
-- **Common false positives (wrong merges):** expected to concentrate on the
-  planted-decoy pattern from Section 2.1: a candidate with a very high name
-  similarity and a house number within the `num_near` threshold (≤20) but wrong,
-  particularly when the differing token is a legal suffix the *other* side lacks
-  entirely (so `leg_conflict` cannot fire, since that feature only triggers when
-  both sides carry a legal tag and disagree). This is the "Hong Management" vs.
-  "Hong Management Inc" pattern.
-- **Common false negatives (missed matches):** expected to concentrate on pairs
-  that combine two or more heavy noise sources at once (e.g. a non-Latin-script
-  Indian name with no address number at all), where blocking may rank the true
-  pair outside `k_rev`/`k_fwd` because the shared, distinguishing vocabulary
-  between the pair is thin. This is the roughly 2 percentage points of true pairs
-  that blocking does not retrieve even at 97.9% measured recall.
+- **F_0.5 Score (macro), validation:** **0.9688** on the 50,000-entity
+  tune set (US + India only, using the tuned decision rule; see Validation protocol
+  in Section 4 for why this needs the full 2.21M-entity scoring pass to be honest).
+  By country: **US 0.9793**, **India 0.9529**. India scores lower, consistent with
+  its heavier noise load (24% non-Latin-script names, transliterated legal forms
+  and state names).
+- **Ceiling on the tune set:** **0.9876** macro F0.5 if the matcher were perfect on
+  the candidates blocking produced (the gap to 1.0 is blocking recall).
+- **Precision/recall of the final matching pipeline (first full run):** precision
+  **99.2%**, recall **93.1%** of all true pairs. Of the roughly 6.9 points of
+  missed recall, about 3.3 points are lost at blocking (true pairs that never
+  became a candidate at all, consistent with the 96.65% blocking recall in Section
+  3), and the rest are pairs that did reach the classifier but scored below the
+  0.725 threshold or lost the one-owner competition to a stronger claim.
+- **Common false positives (wrong merges):** a meaningful share (about 0.8% of
+  predicted pairs) are cases where the label appears arbitrary given the text:
+  after normalisation the pair is essentially identical to a labelled true match
+  elsewhere, yet the ground truth calls it a non-match. Example: for Source 1
+  `Cascade American Partners | 247 Millville Avenue, Hamilton, OH`, the record
+  `CASCADE AMERICAN PARTNERS CORP | 247 MILLVILLE AVE` is a labelled match, while
+  `Cascade American Partners Co | 247 MILLVILLE AVE` at the exact same address is
+  labelled a non-match. The synthetic-decoy generator appears to have produced some
+  decoys that are textually indistinguishable from real noisy copies; this slice of
+  error is irreducible for any text-similarity method, ours included (see the
+  "label ambiguity" note in the code README's Next Iteration Ideas: not worth
+  chasing further). Overall precision is 99.2%, so wrong merges are rare.
+- **Common false negatives (missed matches):** three recurring patterns. (1) The
+  business name replaced by what looks like an unrelated token at the same address,
+  e.g. Source 1 name "Modern It" against a true Source 2/3 match written as
+  "Pyralum": name similarity is near zero and the model scores it around p ~ 0.2,
+  well under threshold, because "same address, unrelated name" also describes a
+  different business at the same address, which the decoys make common. (2) An empty address on
+  one side with an otherwise identical name: these land at p ~ 0.6-0.7, just under
+  the 0.725 cutoff, because the address-similarity features are `NaN` (missing, not
+  matched) and the name signal alone is not quite enough to clear the bar. (3)
+  Partial addresses with the house number missing entirely, which weakens both the
+  address fuzzy-match score and every `num_*` feature at once. All three point the
+  same direction for future work: better use of address-only or name-only evidence
+  when the other side is thin (see the code README's Next Iteration Ideas).
 
 ## 6. Conclusion
 
@@ -316,16 +392,77 @@ the file-by-file map are in `code/business_entity_resolution/README.md`.
 
 ### B. Additional Results
 
-Charts and tables to attach once a full pipeline run completes: the LightGBM
-feature-importance plot behind {{TOP_FEATURES}}, the expected-F0.5-vs-threshold
-curve used to pick {{THRESHOLD_RULE}}, and the France-vs-US-vs-India distribution
-of predicted matches per Source 1 entity described as a sanity check in the code
-README's "Next iteration ideas" section.
+Macro F0.5 on the 50,000-entity tune set as a function of the decision threshold
+(after one-owner assignment). The curve is flat around the optimum, so the choice
+is robust:
 
----
+| threshold | 0.50 | 0.60 | 0.65 | 0.70 | **0.725** | 0.75 | 0.80 | 0.85 | 0.90 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| macro F0.5 | 0.9667 | 0.9681 | 0.9685 | 0.9687 | **0.9688** | 0.9686 | 0.9680 | 0.9665 | 0.9639 |
 
-**Note:** This document follows the required structure of the official
-`Documentation_template.md`. Placeholders in `{{DOUBLE_BRACES}}` mark values that
-depend on an actual training/prediction run (not executed here per instructions)
-and should be filled in from that run's logs before the final submission zip is
-assembled.
+Expected-F0.5 top-k rule, for comparison: 0.9678 to 0.9680 depending on the floor.
+
+Predicted profile on the test set (no labels, so this is a sanity check that the
+model behaves the same in France, which it never saw in training). For reference,
+5.6% of training Source 1 entities are true singletons, with about 3.5 true matches
+on average, and our recall is about 93%:
+
+| country | Source 1 entities | predicted singletons | mean predicted matches |
+| --- | --- | --- | --- |
+| France | 259,452 | 5.6% | 3.22 |
+| India | 809,986 | 6.3% | 3.20 |
+| US | 663,106 | 5.7% | 3.33 |
+
+### C. Code Review Findings
+
+Two independent reviewers audited `normalize.py`, `features.py`, and `matcher.py`/
+`pipeline.py` against the noise catalogue in Section 2.1. Confirmed issues and the
+fixes applied:
+
+- **State names matched inside street names.** The old address normaliser matched
+  state/region names anywhere in the text, so "Washington Street" became "wa st"
+  (Washington treated as a state), affecting roughly 6% of records. Fixed by
+  matching only whole comma-separated address components (`normalize.py`'s
+  `_state()`), so "Washington Street" and "Rue du Nord" are left alone while a
+  segment that is genuinely just "Ohio" or "Gironde" still gets canonicalised.
+- **"S/O" and "C/O" mishandling.** "care of" / "son of" markers (`c/o`, `s/o`,
+  `w/o`, `d/o`) were previously torn apart token by token, leaving stray single
+  letters, and the same single-letter drop list accidentally deleted genuine
+  single-letter street names ("O Street" lost its "O"). Fixed with a dedicated
+  regex that removes the whole `c/o`-style phrase before tokenising, and by
+  removing bare single letters from the address drop-list.
+- **Website-as-name handling was too blunt.** A business name that is literally a
+  domain (`metrocomponents.com`) needs to keep its stem as the name; a domain
+  appended after the real name (`West Ltd | www.westltd.com`) is noise and should
+  be dropped. Fixed by keying on whether an explicit `www.`/`http://` prefix is
+  present: present means "appended link, drop it"; absent means "bare domain-like
+  text, keep the stem".
+- **Leetspeak repair over-corrected real digits.** The digit-to-letter table
+  (`0`->`o`, `1`->`l`, etc.) previously touched digits at either edge of a token,
+  which corrupted real numbers written into names ("24hr", "7eleven", "8th").
+  Fixed by restricting the substitution to a digit with a letter on both sides
+  (`br0thers` still fixes to "brothers"; "24hr" and "7eleven" are left untouched).
+- **Missing text producing a fake similarity score.** A blank field (empty alias,
+  empty first token) previously fell through to a manufactured value (e.g. counting
+  two empty first-tokens as "equal"). `features.py` now returns `NaN` for every
+  similarity feature, including `n_first_eq` and `n_alias`, whenever either side of
+  the comparison is empty, consistent with the rest of the feature set.
+- **Validation-protocol bias.** Described in Section 4's Validation protocol: an
+  earlier version scored only the sampled tune-set entities before one-owner
+  assignment, which could let a held-out entity keep a record an unsampled entity
+  would actually have won on the full set. Fixed by scoring every train candidate
+  pair (all 2.21M Source 1 entities) before restricting to the tune set. The
+  measured effect was small (0.9689 before the fix, 0.9688 after), but the
+  corrected number is the one trusted going forward.
+
+One addition beyond bug-fixing: French address normalisation gained a
+region/department table (`FR_REGIONS` in `normalize.py`), mapping a department to
+its region so records naming either one still match: Gironde -> Nouvelle-Aquitaine
+(`naq`), Nord and Pas-de-Calais -> Hauts-de-France (`hdf`), Loire-Atlantique ->
+Pays de la Loire (`pdl`). This table was derived purely by reading the *unlabelled*
+French test addresses for recurring region/department pairs, the same way the
+US-state and Indian-state tables were built from patterns in the training data; no
+external gazetteer or geocoding service was used, keeping it within the "no
+external data" rule. `normalize.py` also gained a small name-synonym step
+(`NAME_SYN`): "Etablissements"/"Etablissement" -> "ets", matching the existing "Ets"
+abbreviation seen directly in the data.

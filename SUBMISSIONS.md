@@ -12,3 +12,4 @@ probed on the public board; everything else is chosen on our own validation spli
 
 | # | date | uploaded by | file | sha256 (first 16) | code commit | rule | validation F0.5 | public LB F0.5 | notes |
 |---|------|-------------|------|-------------------|-------------|------|-----------------|----------------|-------|
+| 1 | 2026-09-25 | | matching_results.tsv | 486d3f430b1680f4 | 06b7ebd | threshold 0.725 | 0.9688 | | first full run |

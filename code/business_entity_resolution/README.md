@@ -40,11 +40,25 @@ both to `--work/model/`. `predict` loads that saved model, runs it over
 `dataset/test/`, and writes `output/matching_results.tsv` and
 `output/candidate_pairs.tsv`.
 
+To try a different probability cutoff without re-scoring 10M+ test pairs (e.g. to
+probe the leaderboard with a slightly more or less conservative rule):
+
+```bash
+python src/pipeline.py select --t 0.65
+```
+
+This reads the test-set probabilities `predict` already saved to
+`--work/test_scored.parquet`, applies a plain threshold at `p >= 0.65`, and writes
+`output/matching_results_t0.65.tsv` in seconds. It never touches the model or the
+candidate set, so it is only useful for exploring the threshold, not for a different
+model or feature set.
+
 ### Flags
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `command` | (required) | one of `prepare`, `block`, `train`, `predict` |
+| `command` | (required) | one of `prepare`, `block`, `train`, `predict`, `select` |
+| `--t` | `0.75` | `select` only: probability threshold for a new `matching_results_t<t>.tsv` variant, reusing the test scores saved by the last `predict` (no re-scoring) |
 | `--data` | `<repo_root>/6ab10eb3b23ba_student_resource/student_resource/dataset` | dataset root, expects `train/` and `test/` subfolders |
 | `--work` | `~/er_work` | cache directory for normalised data, candidate pairs, features, and the saved model. Keep this off OneDrive/cloud-synced folders: parquet writes under a syncing folder are slow and can be picked up mid-write. |
 | `--out` | `<repo_root>/output` | where `matching_results.tsv` and `candidate_pairs.tsv` are written |
@@ -77,6 +91,22 @@ file already exists:
   error analysis
 - `model/lgb.txt` + `model/rule.json`: the trained model and chosen decision rule
   (from `train`; always overwritten on retrain)
+- `test_scored.parquet`: probability for every test candidate pair (from `predict`).
+  This is what lets `select` produce a new threshold variant in seconds instead of
+  re-scoring 10M+ pairs.
+
+Every file `predict`/`select` writes to `--out` is also logged, one row per write,
+to `output/manifest.tsv` (created on first use): timestamp, file name, the sha256 of
+that exact file, the short git commit hash of the code that produced it (or
+`no-git` if the code folder isn't a git checkout or git isn't installed), the decision rule used, and the
+match count. This is the automatic, code-side half of the submission version
+history the challenge rules require; see `SUBMISSIONS.md` at the repository root
+for the human-maintained half (which of these files were actually uploaded, when,
+and what public/private score each got). The leaderboard budget is 5 uploads/day
+for 3 days, and ranking uses both the public and private board, so most of that
+budget is spent probing the decision threshold with `select` (see above) rather
+than retraining, and each upload gets one row in `SUBMISSIONS.md`. Commit the
+code before running `predict`/`select`, so the manifest points at a real commit.
 
 Caching only checks whether *its own* output file exists, it does not check whether
 an earlier stage changed. If you edit `normalize.py` and want that reflected, you
@@ -94,10 +124,12 @@ but forcing `prepare` alone will NOT automatically recompute `blocking` or
 
 On a 16GB RAM / 12-thread laptop:
 
-- `python src/pipeline.py train`: **{{TRAIN_TIME}}**
-- `python src/pipeline.py predict`: **{{PREDICT_TIME}}**
+- `python src/pipeline.py train`: **about 58 minutes end to end** (normalise ~2 min,
+  blocking ~25 min, features ~2 min, LightGBM fit ~5 min at 1011 rounds, scoring all
+  56M train candidate pairs for the honest validation pass ~25 min)
+- `python src/pipeline.py predict`: **about 41 minutes (normalise 2 min, blocking 15 min, scoring 48M pairs 23 min, writing 1 min)**
 
-(placeholders, fill in after a timed run on the target machine)
+(about 41 minutes (normalise 2 min, blocking 15 min, scoring 48M pairs 23 min, writing 1 min) is a placeholder, fill in after a timed run on the target machine)
 
 ## Self-checks
 
@@ -141,7 +173,7 @@ matched/candidate ID actually exists in the test Source-2/3 files.
 | `blocking.py` | Candidate generation. Builds hashed TF-IDF (word uni+bigram) vectors per country over name and address text and retrieves, per S1 record, its most similar S2/S3 records (forward) and, per S2/S3 record, its most similar S1 records (reverse), unions the two, then attaches TF-IDF cosine and rank/gap "context" features used later by the classifier. `block_country()` is the entry point, called once per country. |
 | `features.py` | Pairwise similarity features for a candidate pair: string-distance and token-overlap scores on the name (`n_*`), legal-form agreement/conflict (`leg_*`), address similarity (`a_*`), and address-number logic that separates true noise (dropped digits, zero-padding) from decoys (nearby-but-different house numbers) (`num_*`). `pair_features()` is the entry point; scoring runs in RapidFuzz's C++ layer across all cores. |
 | `matcher.py` | The LightGBM classifier and the decision rule. `fit()` trains the binary "same business" model; `predict()` scores pairs; `one_owner()` keeps each S2/S3 record for only the S1 entity that scored it highest (run once over ALL S1 entities); `select()` then turns probabilities into final per-S1 lists, either by a plain threshold or by the expected-F0.5 top-k rule; `tune_decision()` picks whichever rule scores best, using the exact competition metric, on held-out S1 entities; `macro_f05()` computes that metric; `save()`/`load()` persist the model and chosen rule. |
-| `pipeline.py` | CLI entry point. Reads the raw TSVs, orchestrates the four stages (`prepare`, `block`, `train`, `predict`) with on-disk caching under `--work`, and writes the two required output files. Also the one place with a Windows-specific gotcha (see below). |
+| `pipeline.py` | CLI entry point. Reads the raw TSVs, orchestrates `prepare`/`block`/`train`/`predict`/`select` with on-disk caching under `--work`, and writes the required output files. `score_pairs()` runs the model over a candidate set in RAM-bounded chunks (used by both `train`'s honest validation pass and `predict`); `write_submission()` applies `one_owner()`+`select()`, writes a matches file, logs per-country singleton rate / mean matches (the France sanity check), and appends a row to `output/manifest.tsv` (sha256, git commit, rule, match count) for every file it writes. Also the one place with a Windows-specific gotcha (see below). |
 | `requirements.txt` | Pinned dependency versions. |
 
 ## How it works, in plain words
@@ -248,13 +280,27 @@ order of expected payoff for effort:
   `--k-rev 5` (more reverse candidates) and re-measure recall vs. candidate-count
   cost. The current config gets 97.9% recall on a US sample; a few points more
   raises the ceiling every downstream stage is capped by.
-- **France sanity checks.** France has no training labels, so before trusting
-  predictions there, plot the distribution of predicted-matches-per-S1 for France
-  against US and India. If France's singleton rate or match-count distribution
-  looks very different from the training countries, the model or decision rule may
-  not be transferring cleanly and needs a closer look (e.g. are French legal-form
-  tokens like SARL/SAS/EURL/SCI and abbreviations like `R.`/`Av`/`Bd`/`N°` actually
-  being normalised the way `US_STATES`/`ABBR` handle US/India text?).
+- **France sanity checks (now logged automatically, still needs a human look).**
+  `write_submission()` already prints, per country, the predicted singleton rate and
+  mean matches per S1 every time `predict`/`select` runs, specifically so France
+  (no training labels) can be eyeballed against US and India without extra work. It
+  is still only a printed log line, not a gate: nothing stops a bad run from
+  shipping. Next step is turning it into an actual check, e.g. fail loudly if
+  France's singleton rate is more than a few points off the US/India range, rather
+  than relying on someone reading the log.
+- **Do not chase the label-ambiguity finding.** Some fraction of "false positives"
+  (see the code review notes in the methodology doc) are pairs the normalised text
+  makes genuinely indistinguishable from a real match, and the ground truth still
+  calls them a non-match. No feature can fix a label that is arbitrary given the
+  available text; spending time trying to claw back this last slice of precision is
+  very likely wasted effort compared to the other ideas here.
+- **Raise recall on empty-address and replaced-name matches.** The two recurring
+  false-negative patterns are a true match with no address at all (name similarity
+  alone lands just under the threshold) and a true match where the name was swapped
+  for a seemingly unrelated token at the same address. Both need a signal beyond
+  what `features.py` currently computes, e.g. weighting address-only agreement more
+  when the name side is uninformative, or a feature that explicitly rewards "same
+  address, different name" instead of only penalising it as a name mismatch.
 - **More rounds / bigger training sample.** `--train-s1` defaults to 300k of the
   ~1.7-2.2M available S1 entities and LightGBM trains for up to 2000 rounds with
   early stopping; if training time allows, a larger sample and more rounds are a

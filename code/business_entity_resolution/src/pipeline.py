@@ -209,8 +209,11 @@ def write_submission(a, norm, scored, rule, name):
         log(f"  {c}: {len(g):,} S1, predicted singletons {(g == 0).mean():.1%}, mean matches {g.mean():.2f}")
     # version history: which code + rule produced exactly which file
     sha = hashlib.sha256(path.read_bytes()).hexdigest()
-    commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
-                            cwd=Path(__file__).parent).stdout.strip() or "no-git"
+    try:
+        commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
+                                cwd=Path(__file__).parent).stdout.strip() or "no-git"
+    except OSError:                                                  # git not installed (e.g. a grader's machine)
+        commit = "no-git"
     manifest = a.out / "manifest.tsv"
     new = not manifest.exists()
     with manifest.open("a", encoding="utf-8") as fh:

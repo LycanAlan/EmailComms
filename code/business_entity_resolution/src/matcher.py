@@ -23,7 +23,7 @@ import pandas as pd
 NOT_FEATURES = {"q", "i", "y", "p"}
 PARAMS = dict(objective="binary", learning_rate=0.08, num_leaves=127, min_data_in_leaf=200,
               feature_fraction=0.8, bagging_fraction=0.8, bagging_freq=1, lambda_l2=1.0,
-              num_threads=12, verbose=-1, seed=0)
+              num_threads=8, verbose=-1, seed=0)
 
 
 def fit(tr, va, rounds=2000):
@@ -39,7 +39,7 @@ def fit(tr, va, rounds=2000):
 
 
 def predict(m, f):
-    return m.predict(f[m.feature_name()].to_numpy(np.float32), num_threads=12).astype(np.float32)
+    return m.predict(f[m.feature_name()].to_numpy(np.float32), num_threads=8).astype(np.float32)
 
 
 def one_owner(scored):

@@ -57,7 +57,7 @@ def topk(Q, I, k, threshold=0.05, chunk=100_000):
     IT = I.T.tocsr()
     qs, is_, rs = [], [], []
     for s in range(0, Q.shape[0], chunk):
-        M = sp_matmul_topn(Q[s:s + chunk], IT, top_n=k, threshold=threshold, sort=True, n_threads=12).tocsr()
+        M = sp_matmul_topn(Q[s:s + chunk], IT, top_n=k, threshold=threshold, sort=True, n_threads=8).tocsr()
         n = np.diff(M.indptr)
         qs.append(np.repeat(np.arange(s, s + M.shape[0]), n))
         is_.append(M.indices)

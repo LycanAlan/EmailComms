@@ -239,7 +239,7 @@ def main():
     ap.add_argument("--out", type=Path, default=ROOT / "output")
     ap.add_argument("--split", default="train", help="for prepare/block only")
     ap.add_argument("--force", nargs="*", default=[], choices=["prepare", "blocking", "features"])
-    ap.add_argument("--jobs", type=int, default=11)
+    ap.add_argument("--jobs", type=int, default=7)
     ap.add_argument("--k-rev", type=int, default=3, help="S1 candidates kept per S2/S3 record")
     ap.add_argument("--k-fwd", type=int, default=10, help="S2 (and S3) candidates kept per S1 record")
     ap.add_argument("--prune", type=float, default=0.002, help="query-side max document frequency")

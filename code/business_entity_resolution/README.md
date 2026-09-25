@@ -64,7 +64,7 @@ model or feature set.
 | `--out` | `<repo_root>/output` | where `matching_results.tsv` and `candidate_pairs.tsv` are written |
 | `--split` | `train` | which split to normalise/block; only used by the standalone `prepare`/`block` commands |
 | `--force` | `[]` | any of `prepare`, `blocking`, `features`: recompute that stage instead of reusing its cache (see below) |
-| `--jobs` | `11` | worker processes for normalisation and blocking |
+| `--jobs` | `7` | worker processes for normalisation and blocking |
 | `--k-rev` | `3` | S1 candidates kept per S2/S3 record (reverse retrieval) |
 | `--k-fwd` | `10` | S2/S3 candidates kept per S1 record, per source (forward retrieval) |
 | `--prune` | `0.002` | query-side max document frequency; terms commoner than this fraction of rows are dropped before the sparse similarity search |

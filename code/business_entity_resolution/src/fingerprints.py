@@ -37,7 +37,7 @@ RX = {  # RE2 patterns on the RAW strings, run in Arrow's C++ layer
     "alead": ("addr", r"^\W"),
 }
 FLAG_COLS = [f"fp_{k}" for k in RX] + ["fp_ntok", "fp_nlen", "fp_alen", "fp_acomma"]
-AMB_COLS = ["amb_core", "amb_phon", "oov_share", "oov_n"]
+AMB_COLS = ["amb_core", "amb_phon", "oov_share", "oov_n", "tw_sound", "tw_addr", "tw_name"]
 
 
 def raw_flags(name, addr):
@@ -78,6 +78,21 @@ def ambiguity(norm):
         s = np.add.reduceat(np.append(oov, 0), np.minimum(starts, len(oov))) * (lens > 0)
         out["oov_n"][rows] = s
         out["oov_share"][rows] = np.where(lens > 0, s / np.maximum(lens, 1), np.nan)
+    # Twins: OTHER S2/S3 records of the country with the same name sound + numbers / address / name.
+    # A true business has several copies that agree with each other, a decoy is a one-off: on US train
+    # 44.9% of true copies have a sound+numbers twin, 1.2% of decoys.
+    pl = src != 1
+    txt = lambda c: pa.array(norm[c].astype(str).to_numpy(), pa.large_string())
+    def twins(*cols):
+        key = cty
+        for c in cols:
+            key = pc.binary_join_element_wise(key, txt(c), pa.scalar("|", pa.large_string()))
+        codes = pc.dictionary_encode(key).indices.to_numpy()
+        return (np.bincount(codes[pl], minlength=codes.max() + 1)[codes] - pl).astype(np.float32)
+    has = lambda c: pc.greater(pc.utf8_length(txt(c)), 0).to_numpy(zero_copy_only=False)
+    out["tw_sound"] = np.where(has("phon") & has("nums"), twins("phon", "nums"), np.nan)
+    out["tw_addr"] = np.where(has("addr"), twins("addr"), np.nan)
+    out["tw_name"] = np.where(has("core"), twins("core"), np.nan)
     return pd.DataFrame(out)
 
 
@@ -96,6 +111,9 @@ def pair_extras(f, norm, q, i):
     f["amb_phon_i"] = col("amb_phon")[i]
     f["oov_share_i"] = col("oov_share")[i]
     f["oov_n_i"] = col("oov_n")[i]
+    for k in ("tw_sound", "tw_addr", "tw_name"):
+        f[f"{k}_i"] = col(k)[i]
+    f["tw_sound_q"] = col("tw_sound")[q]                                   # S2/S3 records carrying the S1's exact sound + numbers
     return f
 
 
@@ -107,9 +125,12 @@ def demo():
     assert df.fp_ncaps.tolist() == [0, 0, 0, 0] and df.fp_leet.tolist() == [0, 0, 0, 0]   # "UNlTED": lowercase l, not all caps
     norm = pd.DataFrame({"src": np.int8([1, 1, 2, 2]), "country": ["US"] * 4,
                          "core": ["hays furniture", "hays furniture", "hays furniture", "onyxviocalo"],
-                         "phon": ["hs frntr", "hs frntr", "hs frntr", "onksvkl"]})
+                         "phon": ["hs frntr", "hs frntr", "hs frntr", "onksvkl"],
+                         "addr": ["12 main st", "40 oak ave", "12 main st", ""], "nums": ["12", "40", "12", ""]})
     A = ambiguity(norm)
     assert A.amb_core.tolist() == [2, 2, 2, 0] and A.oov_share.tolist() == [0, 0, 0, 1]
+    assert A.tw_name.tolist() == [1, 1, 0, 0]                            # the one S2 named 'hays furniture'; itself excluded
+    assert A.tw_sound.tolist()[:3] == [1, 0, 0] and np.isnan(A.tw_sound[3]) and np.isnan(A.tw_addr[3])
     print("fingerprints.demo OK")
 
 

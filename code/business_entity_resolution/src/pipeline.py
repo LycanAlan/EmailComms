@@ -58,7 +58,7 @@ def load_norm(a, split):
     """All records of a split (S1, S2, S3 stacked), normalised, plus the raw-text fingerprints and name
     ambiguity of fingerprints.py (cached separately). Row position = record key."""
     norm = _normalised(a, split)
-    path = a.work / f"{split}_extras.parquet"
+    path = a.work / f"{split}_extras_v{features.VERSION}.parquet"   # extras change with the feature set
     if path.exists() and "prepare" not in a.force:
         extra = pd.read_parquet(path)
     else:

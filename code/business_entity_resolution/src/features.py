@@ -28,7 +28,7 @@ from rapidfuzz.distance import JaroWinkler
 import fingerprints
 
 NAN = np.float32(np.nan)
-VERSION = 3          # bump when the feature set changes: cached feature tables carry it in their file name
+VERSION = 4          # bump when the feature set changes: cached feature tables carry it in their file name
 
 
 def _sim(a, b, scorer):

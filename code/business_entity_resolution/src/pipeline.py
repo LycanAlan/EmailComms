@@ -194,7 +194,8 @@ def cmd_select(a):
     """Another decision threshold on the saved test scores, e.g. to probe the leaderboard."""
     norm = load_norm(a, "test")
     scored = pd.read_parquet(a.work / "test_scored.parquet")
-    write_submission(a, norm, scored, {"kind": "threshold", "t": a.t}, f"matching_results_t{a.t:g}.tsv")
+    write_submission(a, norm, scored, {"kind": "threshold", "t": a.t, "margin": a.margin},
+                     f"matching_results_t{a.t:g}_m{a.margin:g}.tsv")
 
 
 def write_submission(a, norm, scored, rule, name):
@@ -234,6 +235,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("command", choices=["prepare", "block", "train", "predict", "select"])
     ap.add_argument("--t", type=float, default=0.75, help="select: probability threshold for the variant file")
+    ap.add_argument("--margin", type=float, default=0.0, help="select: runner-up S1 must trail the owner by this much")
     ap.add_argument("--data", type=Path, default=ROOT / "6ab10eb3b23ba_student_resource/student_resource/dataset")
     ap.add_argument("--work", type=Path, default=Path.home() / "er_work", help="cache dir (keep it off OneDrive)")
     ap.add_argument("--out", type=Path, default=ROOT / "output")

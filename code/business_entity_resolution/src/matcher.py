@@ -44,14 +44,21 @@ def predict(m, f):
 
 def one_owner(scored):
     """Step 1: each S2/S3 record stays only with the S1 entity that scored it highest.
-    Must see ALL S1 entities at once, or the competition it resolves is missing."""
-    return scored.sort_values("p", ascending=False, kind="stable").drop_duplicates("i")
+    Must see ALL S1 entities at once, or the competition it resolves is missing.
+    Also keeps p2 = the runner-up S1's probability: pairs are scored one at a time, so two
+    S1 entities can both reach 0.9 for one record; such picks were right only ~57% of the time."""
+    s = scored.sort_values("p", ascending=False, kind="stable")
+    first = ~s.i.duplicated().to_numpy()
+    p2 = s[~first].drop_duplicates("i").set_index("i").p
+    own = s[first].copy()
+    own["p2"] = p2.reindex(own.i.to_numpy()).fillna(0).to_numpy(np.float32)
+    return own
 
 
 def select(s, rule):
     """Step 2, per S1 entity, on one_owner() output: which candidates to keep."""
-    if rule["kind"] == "threshold":
-        return s[s.p >= rule["t"]]
+    if rule["kind"] == "threshold":                                 # margin: runner-up S1 must trail by this much
+        return s[(s.p >= rule["t"]) & (s.p - s.p2 >= rule.get("margin", 0.0))]
     # expected-F0.5 top-k
     s = s.sort_values(["q", "p"], ascending=[True, False], kind="stable")
     g = s.groupby("q", sort=False).p
@@ -78,7 +85,8 @@ def macro_f05(picked, s1_rows, n_true):
 
 def tune_decision(owned, s1_rows, n_true):
     """owned: one_owner() output restricted to s1_rows, with labels y."""
-    rules = [{"kind": "threshold", "t": round(t, 3)} for t in np.arange(0.2, 0.96, 0.025).tolist()]
+    rules = [{"kind": "threshold", "t": round(t, 3), "margin": m}
+             for t in np.arange(0.4, 0.96, 0.025).tolist() for m in (0.0, 0.4, 0.5, 0.6, 0.7)]
     rules += [{"kind": "expected_f", "floor": fl} for fl in (0.0, 0.1, 0.2, 0.3, 0.4, 0.5)]
     best = None
     for r in rules:
@@ -105,8 +113,11 @@ def demo():
     s = pd.DataFrame({"q": [1, 1, 1, 2, 3], "i": [10, 11, 12, 10, 13],
                       "p": [0.95, 0.9, 0.2, 0.6, 0.1], "y": [1, 1, 0, 0, 0]})
     n_true = pd.Series({1: 2, 2: 0, 3: 0})
-    picked = select(one_owner(s), {"kind": "expected_f", "floor": 0.0})
+    own = one_owner(s)
+    picked = select(own, {"kind": "expected_f", "floor": 0.0})
     assert sorted(picked.i) == [10, 11], picked                     # 12 too weak, 10 not given to #2
+    assert own.set_index("i").p2.to_dict() == {10: np.float32(0.6), 11: 0, 12: 0, 13: 0}
+    assert sorted(select(own, {"kind": "threshold", "t": 0.5, "margin": 0.4}).i) == [11]   # 10: 0.95 vs rival 0.6
     assert macro_f05(picked, [1, 2, 3], n_true) == 1.0
     assert abs(macro_f05(s.iloc[:3], [1], n_true) - 1.25 * 2 / (0.5 + 3)) < 1e-9   # the PDF's 0.714 example
     print("matcher.demo OK")

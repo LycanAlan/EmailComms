@@ -133,3 +133,36 @@ def add_context(c):
         c[f"{col}_rgap"] = r.transform("max") - c[col]             # distance to the candidate's best S1
     c["n_s1_for_i"] = c.groupby("i").q.transform("size").astype(np.float32)
     c["n_high"] = c.assign(h=c.cos_w > 0.5).groupby(["q", "src"]).h.transform("sum").astype(np.float32)
+    add_margins(c)
+
+
+MARGIN_COLS = [f"{c}_{s}" for c in ("cos_w", "cos_nw", "cos_aw") for s in ("rmarg", "qmarg")] + ["n_close_i"]
+
+
+def best_other(g, v):
+    """For rows grouped by g: the best value among the OTHER rows of the same group (-1 if alone)."""
+    o = np.lexsort((-v, g))
+    gs, vs = g[o], v[o]
+    first = np.r_[True, gs[1:] != gs[:-1]]
+    start = np.maximum.accumulate(np.where(first, np.arange(len(gs)), 0))
+    nxt = np.minimum(start + 1, len(gs) - 1)
+    top2 = np.where((gs[nxt] == gs) & (nxt != start), vs[nxt], -1.0)
+    out = np.empty(len(v), np.float32)
+    out[o] = np.where(np.arange(len(gs)) == start, top2, vs[start])
+    return out
+
+
+def add_margins(c):
+    """Self minus the best OTHER claimant. *_rgap is 0 for the winner whether it wins by a mile or ties
+    (two S1 entities with the same name and an empty-address candidate); *_rmarg tells them apart."""
+    q, i = c.q.to_numpy(), c.i.to_numpy()
+    qs = q.astype(np.int64) * 4 + c.src.to_numpy()
+    for col in ("cos_w", "cos_nw", "cos_aw"):
+        v = c[col].to_numpy().astype(np.float32)
+        bo = best_other(i, v)
+        c[f"{col}_rmarg"] = np.where(bo >= 0, v - bo, np.nan).astype(np.float32)   # vs other S1s claiming this record
+        bq = best_other(qs, v)
+        c[f"{col}_qmarg"] = np.where(bq >= 0, v - bq, np.nan).astype(np.float32)   # vs this S1's other candidates
+    v = c.cos_w.to_numpy().astype(np.float32)
+    top = pd.Series(v).groupby(i).transform("max").to_numpy()
+    c["n_close_i"] = pd.Series(v >= top - 0.05).groupby(i).transform("sum").to_numpy().astype(np.float32)

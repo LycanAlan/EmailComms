@@ -20,9 +20,11 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.csv as pacsv
+import pyarrow.parquet as pq
 
 import blocking
 import features
+import fingerprints
 import matcher
 import normalize
 
@@ -35,12 +37,15 @@ def log(msg):
     print(time.strftime("%H:%M:%S"), msg, flush=True)
 
 
+def read_arrow(path):
+    return pacsv.read_csv(path, parse_options=pacsv.ParseOptions(delimiter="\t", quote_char=False),
+                          convert_options=pacsv.ConvertOptions(strings_can_be_null=False,
+                                                               column_types={c: pa.string() for c in
+                                                                             ["entity_id", "business_name", "business_address", "country"]}))
+
+
 def read_tsv(path):
-    t = pacsv.read_csv(path, parse_options=pacsv.ParseOptions(delimiter="\t", quote_char=False),
-                       convert_options=pacsv.ConvertOptions(strings_can_be_null=False,
-                                                            column_types={c: pa.string() for c in
-                                                                          ["entity_id", "business_name", "business_address", "country"]}))
-    return t.to_pandas(types_mapper={pa.string(): STR}.get)
+    return read_arrow(path).to_pandas(types_mapper={pa.string(): STR}.get)
 
 
 def _norm_chunk(rows):
@@ -50,7 +55,25 @@ def _norm_chunk(rows):
 
 
 def load_norm(a, split):
-    """All records of a split (S1, S2, S3 stacked), normalised. Row position = record key."""
+    """All records of a split (S1, S2, S3 stacked), normalised, plus the raw-text fingerprints and name
+    ambiguity of fingerprints.py (cached separately). Row position = record key."""
+    norm = _normalised(a, split)
+    path = a.work / f"{split}_extras.parquet"
+    if path.exists() and "prepare" not in a.force:
+        extra = pd.read_parquet(path)
+    else:
+        log(f"prepare {split}: raw-text fingerprints + name ambiguity")
+        parts = []
+        for s in (1, 2, 3):
+            t = read_arrow(a.data / split / f"{split}_source{s}.tsv")
+            parts.append(fingerprints.raw_flags(t["business_name"], t["business_address"]))
+            del t
+        extra = pd.concat([pd.concat(parts, ignore_index=True), fingerprints.ambiguity(norm)], axis=1)
+        extra.to_parquet(path)
+    return pd.concat([norm, extra], axis=1)
+
+
+def _normalised(a, split):
     path = a.work / f"{split}_norm.parquet"
     if path.exists() and "prepare" not in a.force:
         return pd.read_parquet(path).astype({"id": STR, "country": STR, **{c: STR for c in NORM_COLS if c != "nl"}})
@@ -88,6 +111,12 @@ def load_candidates(a, split, norm):
             pos = d.index.to_numpy()
             c["q"], c["i"] = pos[c.q.to_numpy()], pos[c.i.to_numpy()]
             c.to_parquet(path)
+        elif "cos_w_rmarg" not in pq.read_schema(path).names:          # cache from before the margin features
+            log(f"adding runner-up margins to {path.name}")
+            c = pd.read_parquet(path)
+            blocking.add_margins(c)
+            c.to_parquet(path)
+            del c
         out[cty] = path
     return out
 
@@ -107,7 +136,7 @@ def truth_pairs(a, norm):
 
 def build_features(a, norm, cand_paths, s1_keep):
     """Feature table for the candidate pairs of the sampled train S1 rows."""
-    path = a.work / f"train_feats_{a.train_s1}_{a.valid_s1}.parquet"      # the sample is fixed by seed + sizes
+    path = a.work / f"train_feats_v{features.VERSION}_{a.train_s1}_{a.valid_s1}.parquet"   # sample fixed by seed + sizes
     if path.exists() and not {"features", "blocking"} & set(a.force):
         return pd.read_parquet(path)
     parts = []
@@ -194,13 +223,26 @@ def cmd_select(a):
     """Another decision threshold on the saved test scores, e.g. to probe the leaderboard."""
     norm = load_norm(a, "test")
     scored = pd.read_parquet(a.work / "test_scored.parquet")
-    write_submission(a, norm, scored, {"kind": "threshold", "t": a.t, "margin": a.margin},
-                     f"matching_results_t{a.t:g}_m{a.margin:g}.tsv")
+    rule = {"kind": "threshold", "t": a.t, "margin": a.margin}
+    name = f"matching_results_t{a.t:g}_m{a.margin:g}"
+    if a.t_country:                                                  # e.g. France=0.85: probe one country's cutoff alone
+        rule["by_country"] = {k: float(v) for k, v in (x.split("=") for x in a.t_country)}
+        name += "".join(f"_{k}{v:g}" for k, v in rule["by_country"].items())
+    write_submission(a, norm, scored, rule, name + ".tsv")
 
 
 def write_submission(a, norm, scored, rule, name):
     s1_rows = np.flatnonzero(norm.src.to_numpy() == 1)
-    picked = matcher.select(matcher.one_owner(scored), rule)
+    owned = matcher.one_owner(scored)
+    if rule.get("by_country"):
+        t = np.full(len(owned), rule["t"], np.float32)
+        cty = norm.country.to_numpy()[owned.q.to_numpy()]
+        for c, v in rule["by_country"].items():
+            t[cty == c] = v
+        p = owned.p.to_numpy()
+        picked = owned[(p >= t) & (p - owned.p2.to_numpy() >= rule.get("margin", 0.0))]
+    else:
+        picked = matcher.select(owned, rule)
     path = a.out / name
     write_lists(path, "matched_entity_ids", norm.id.to_numpy(), s1_rows, picked.q.to_numpy(), picked.i.to_numpy())
     log(f"wrote {path}: {len(picked):,} matches for {len(s1_rows):,} S1 entities, rule {rule}")
@@ -234,8 +276,10 @@ def write_lists(path, col, ids, s1_rows, q, i):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("command", choices=["prepare", "block", "train", "predict", "select"])
-    ap.add_argument("--t", type=float, default=0.75, help="select: probability threshold for the variant file")
+    ap.add_argument("--t", type=float, default=0.7, help="select: probability threshold for the variant file")
     ap.add_argument("--margin", type=float, default=0.0, help="select: runner-up S1 must trail the owner by this much")
+    ap.add_argument("--t-country", nargs="*", default=[], metavar="COUNTRY=T",
+                    help="select: override the threshold for one country, e.g. France=0.85")
     ap.add_argument("--data", type=Path, default=ROOT / "6ab10eb3b23ba_student_resource/student_resource/dataset")
     ap.add_argument("--work", type=Path, default=Path.home() / "er_work", help="cache dir (keep it off OneDrive)")
     ap.add_argument("--out", type=Path, default=ROOT / "output")

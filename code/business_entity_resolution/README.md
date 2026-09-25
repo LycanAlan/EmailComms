@@ -51,14 +51,23 @@ This reads the test-set probabilities `predict` already saved to
 `--work/test_scored.parquet`, applies a plain threshold at `p >= 0.65`, and writes
 `output/matching_results_t0.65.tsv` in seconds. It never touches the model or the
 candidate set, so it is only useful for exploring the threshold, not for a different
-model or feature set.
+model or feature set. To move one country's cutoff alone (France has no training
+labels, so its best cutoff can only be probed on the leaderboard):
+
+```bash
+python src/pipeline.py select --t 0.7 --t-country France=0.85
+```
+
+writes `output/matching_results_t0.7_m0_France0.85.tsv`.
 
 ### Flags
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `command` | (required) | one of `prepare`, `block`, `train`, `predict`, `select` |
-| `--t` | `0.75` | `select` only: probability threshold for a new `matching_results_t<t>.tsv` variant, reusing the test scores saved by the last `predict` (no re-scoring) |
+| `--t` | `0.7` | `select` only: probability threshold for a new `matching_results_t<t>.tsv` variant, reusing the test scores saved by the last `predict` (no re-scoring) |
+| `--margin` | `0` | `select` only: keep a pick only if the runner-up S1 for that record scored at least this much lower |
+| `--t-country` | `[]` | `select` only: per-country overrides of `--t`, e.g. `France=0.85` |
 | `--data` | `<repo_root>/6ab10eb3b23ba_student_resource/student_resource/dataset` | dataset root, expects `train/` and `test/` subfolders |
 | `--work` | `~/er_work` | cache directory for normalised data, candidate pairs, features, and the saved model. Keep this off OneDrive/cloud-synced folders: parquet writes under a syncing folder are slow and can be picked up mid-write. |
 | `--out` | `<repo_root>/output` | where `matching_results.tsv` and `candidate_pairs.tsv` are written |
@@ -82,10 +91,13 @@ Every stage writes its result under `--work` and is skipped on the next run if t
 file already exists:
 
 - `{split}_norm.parquet`: normalised S1+S2+S3 records (from `prepare`)
-- `{split}_cands_<country>.parquet`: one file per country (from `block`)
-- `train_feats_<train_s1>_<valid_s1>.parquet`: features of the sampled train S1
-  entities (from `train`; the file name changes with the sample sizes, so changing
-  `--train-s1`/`--valid-s1` never reuses a stale sample). Test features are computed
+- `{split}_extras.parquet`: raw-text fingerprints + name ambiguity per record (from
+  `prepare`, see `fingerprints.py`)
+- `{split}_cands_<country>.parquet`: one file per country (from `block`). A cache
+  written before the runner-up margin features existed gets them added on load.
+- `train_feats_v<version>_<train_s1>_<valid_s1>.parquet`: features of the sampled
+  train S1 entities (from `train`; the file name changes with the feature-set version
+  and the sample sizes, so a stale table is never reused). Test features are computed
   in chunks and never stored.
 - `tune_scored.parquet`: probabilities + labels of the rule-tuning S1 entities, for
   error analysis
@@ -170,8 +182,9 @@ matched/candidate ID actually exists in the test Source-2/3 files.
 | File | Role |
 | --- | --- |
 | `normalize.py` | Turns a raw `business_name`/`business_address` into canonical, comparable fields: `core` (name minus legal form/filler/noise), `alt` (the "Y" in "formerly known as Y" / "dba Y"), `legal` (legal-form family, e.g. `ltd`, `llp`, `sarl`), `phon` (consonant-skeleton phonetic key, robust to typos and transliteration), `nosp` (`core` with spaces stripped, matches names against website-style handles), `addr` (address with abbreviations/state names canonicalised), `nums` (numbers pulled out of the address, leading zeros stripped), `nl` (1 if the raw name used a non-Latin script). Pure functions, no I/O. |
-| `blocking.py` | Candidate generation. Builds hashed TF-IDF (word uni+bigram) vectors per country over name and address text and retrieves, per S1 record, its most similar S2/S3 records (forward) and, per S2/S3 record, its most similar S1 records (reverse), unions the two, then attaches TF-IDF cosine and rank/gap "context" features used later by the classifier. `block_country()` is the entry point, called once per country. |
+| `blocking.py` | Candidate generation. Builds hashed TF-IDF (word uni+bigram) vectors per country over name and address text and retrieves, per S1 record, its most similar S2/S3 records (forward) and, per S2/S3 record, its most similar S1 records (reverse), unions the two, then attaches TF-IDF cosine, rank/gap "context" features and runner-up margins (how far a pair is ahead of the best competing claimant; `rgap` alone is 0 for a winner whether it wins clearly or ties) used later by the classifier. `block_country()` is the entry point, called once per country. |
 | `features.py` | Pairwise similarity features for a candidate pair: string-distance and token-overlap scores on the name (`n_*`), legal-form agreement/conflict (`leg_*`), address similarity (`a_*`), and address-number logic that separates true noise (dropped digits, zero-padding) from decoys (nearby-but-different house numbers) (`num_*`). `pair_features()` is the entry point; scoring runs in RapidFuzz's C++ layer across all cores. |
+| `fingerprints.py` | Record-level signals that normalisation erases. Raw-text "generator fingerprints": the synthetic noise (empty address, address without numbers, website or alias in the name, lowercase, leetspeak...) is applied to true copies far more often than to decoys, while decoys are longer and keep their legal form. Name ambiguity: how many S1 entities share a record's cleaned name or phonetic key, and how much of a name is made of words used by no S1 name (made-up replacement names). All computed per country from the split's own records, without labels. |
 | `matcher.py` | The LightGBM classifier and the decision rule. `fit()` trains the binary "same business" model; `predict()` scores pairs; `one_owner()` keeps each S2/S3 record for only the S1 entity that scored it highest (run once over ALL S1 entities); `select()` then turns probabilities into final per-S1 lists, either by a plain threshold or by the expected-F0.5 top-k rule; `tune_decision()` picks whichever rule scores best, using the exact competition metric, on held-out S1 entities; `macro_f05()` computes that metric; `save()`/`load()` persist the model and chosen rule. |
 | `pipeline.py` | CLI entry point. Reads the raw TSVs, orchestrates `prepare`/`block`/`train`/`predict`/`select` with on-disk caching under `--work`, and writes the required output files. `score_pairs()` runs the model over a candidate set in RAM-bounded chunks (used by both `train`'s honest validation pass and `predict`); `write_submission()` applies `one_owner()`+`select()`, writes a matches file, logs per-country singleton rate / mean matches (the France sanity check), and appends a row to `output/manifest.tsv` (sha256, git commit, rule, match count) for every file it writes. Also the one place with a Windows-specific gotcha (see below). |
 | `requirements.txt` | Pinned dependency versions. |

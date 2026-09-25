@@ -25,7 +25,10 @@ import pandas as pd
 from rapidfuzz import fuzz, process
 from rapidfuzz.distance import JaroWinkler
 
+import fingerprints
+
 NAN = np.float32(np.nan)
+VERSION = 2          # bump when the feature set changes: cached feature tables carry it in their file name
 
 
 def _sim(a, b, scorer):
@@ -114,7 +117,7 @@ def pair_features(c, norm):
                               "num_trunc", "num_near", "num_logdiff"]):
         f[name] = nf[:, k]
     f["num_digits"] = _sim([x.replace(" ", "") for x in ua], [y.replace(" ", "") for y in ub], fuzz.ratio)
-    return f
+    return fingerprints.pair_extras(f, norm, q, i)
 
 
 def demo():

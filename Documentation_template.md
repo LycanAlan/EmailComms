@@ -1,7 +1,7 @@
 # ML Challenge 2026: Business Entity Resolution Solution Documentation
 
-**Team Name:** {{TEAM_NAME}}
-**Team Members:** {{TEAM_MEMBERS}}
+**Team Name:** Faith
+**Team Members:** Ali Ansari (Team Leader), Raghav Malani
 **Submission Date:** {{SUBMISSION_DATE}}
 
 ---

@@ -150,14 +150,25 @@ def build_features(a, norm, cand_paths, s1_keep):
     return f
 
 
-def score_pairs(a, norm, cand_paths, model):
-    """P(match) for EVERY candidate pair, in chunks to bound RAM -> DataFrame(q, i, p)."""
+def score_pairs(a, norm, cand_paths, model, keep_q=None):
+    """P(match) for EVERY candidate pair -> DataFrame(q, i, p). The candidate file is streamed in
+    chunks: loaded whole, a country's table (~45 columns x 45M pairs) no longer fits in RAM.
+    keep_q: only the pairs of records that some keep_q S1 retrieved. one_owner() decides a record
+    from its own pairs alone, so the keep_q rows come out exactly as if everything was scored."""
     scored = []
     for cty, p in cand_paths.items():
-        c = pd.read_parquet(p)
-        log(f"scoring {cty}: {len(c):,} pairs")
-        for s in range(0, len(c), a.chunk):
-            f = features.pair_features(c.iloc[s:s + a.chunk].reset_index(drop=True), norm)
+        keep_i = None
+        if keep_q is not None:
+            qi = pd.read_parquet(p, columns=["q", "i"])
+            keep_i = np.unique(qi.i.to_numpy()[np.isin(qi.q.to_numpy(), keep_q)])
+            del qi
+        log(f"scoring {cty}: {pq.read_metadata(p).num_rows:,} pairs" + ("" if keep_i is None else
+                                                                        f", those of {len(keep_i):,} records"))
+        for b in pq.ParquetFile(p).iter_batches(batch_size=a.chunk):
+            c = b.to_pandas()
+            if keep_i is not None:
+                c = c[np.isin(c.i.to_numpy(), keep_i)].reset_index(drop=True)
+            f = features.pair_features(c, norm)
             scored.append(pd.DataFrame({"q": f.q.to_numpy(np.int32), "i": f.i.to_numpy(np.int32),
                                         "p": matcher.predict(model, f)}))
     return pd.concat(scored, ignore_index=True)
@@ -187,9 +198,9 @@ def cmd_train(a):
     model = matcher.fit(f[~is_stop], f[is_stop])
     del f
 
-    # Honest evaluation: score EVERY train pair (all 2.2M S1), so the one-owner step sees the same
-    # competition between S1 entities as it will on test, then judge only the untouched tune_q entities.
-    owned = matcher.one_owner(score_pairs(a, norm, cands, model))
+    # Honest evaluation: every S1 (of all 2.2M) competing for a record the tune_q entities retrieved is
+    # scored, so the one-owner step sees the same competition as on test; judge only the untouched tune_q.
+    owned = matcher.one_owner(score_pairs(a, norm, cands, model, keep_q=tune_q))
     ev = owned[np.isin(owned.q.to_numpy(), tune_q)].copy()
     ev["y"] = np.isin(key(ev.q.to_numpy(), ev.i.to_numpy()), truth).astype(np.int8)
     reachable = truth[np.isin(tq, tune_q) & found]                  # true pairs blocking kept

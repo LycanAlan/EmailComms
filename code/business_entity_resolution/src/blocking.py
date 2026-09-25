@@ -89,11 +89,17 @@ def unmatched_mass(X, a, b, chunk=2_000_000):
     return out
 
 
-def combo_keys(phon, nums):
+def combo_keys(phon, nums, addr):
     """'house number x name sound' keys: '79_sftvr' = number 79 + skeleton of 'software'.
     Kannada 'saaphttveer' and English 'software' share the skeleton, so the key links a
-    transliterated record to its S1 even when the words differ, and a number+name pair is rare."""
-    return [" ".join(f"{n}_{p}" for n in ns.split() for p in ps.split()) for ps, ns in zip(phon, nums)]
+    transliterated record to its S1 even when the words differ, and a number+name pair is rare.
+    Plus 'house number x address word' keys: '27@montesquieu'. A French street holds ~14
+    businesses and house numbers repeat, so '27' and the street words alone are too common to
+    survive query pruning: 23% of France's same-address, different-name copies were never
+    retrieved (US/India: 0%). Joined to the number they are rare, whatever the name says."""
+    return [" ".join([f"{n}_{p}" for n in ns.split() for p in ps.split()] +
+                     [f"{n}@{w}" for n in ns.split() for w in a.split() if not w.isdigit()])
+            for ps, ns, a in zip(phon, nums, addr)]
 
 
 def block_country(d, k_rev, k_fwd, prune, pool, k_combo=3):
@@ -104,7 +110,7 @@ def block_country(d, k_rev, k_fwd, prune, pool, k_combo=3):
     s1, pl = np.flatnonzero(src == 1), np.flatnonzero(src != 1)
     if not len(s1) or not len(pl):
         return None
-    K = tfidf(hashed_counts(combo_keys(d.phon.tolist(), d.nums.tolist()), pool))
+    K = tfidf(hashed_counts(combo_keys(d.phon.tolist(), d.nums.tolist(), d.addr.tolist()), pool))
     q, i, r = topk(prune_common(K[pl], prune), K[s1], k_combo)
     parts = [pd.DataFrame({"q": s1[i], "i": pl[q], "rank_combo": r})]
 

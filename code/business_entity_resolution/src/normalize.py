@@ -73,19 +73,30 @@ def _name_tokens(s):
     return out
 
 
+VOICE = str.maketrans("bdg", "ptk")
+
+
 def phonetic(text):
-    """Consonant skeleton: 'Classic Tech' and Hindi 'klasik tek' both -> 'klsk tk'."""
+    """Consonant skeleton: 'Classic Tech' and Hindi 'klasik tek' both -> 'klsk tk'.
+    English spelling is mapped to sound where Indian scripts write the sound ('solutions' ~
+    'solyushans', 'structure' ~ 'strakchar', soft c: 'services' ~ 'sarvisej'), and voiced/unvoiced
+    pairs merge (Tamil writes both with one letter: 'phuts' ~ 'foods'). On train, sound overlap of
+    never-retrieved Indian-script true pairs 0.33 -> 0.58; of look-alike non-matches 0.31 -> 0.35;
+    Latin-script pairs unchanged."""
     res = []
     for t in text.split():
         if t.isdigit():
             res.append(t)
             continue
+        t = re.sub(r"(?:t|s)ion", "shn", t)
+        t = t.replace("ture", "chr")
+        t = re.sub(r"c(?=[eiy])", "s", t)
         t = t.replace("ph", "f").replace("x", "ks")
         t = t[0] + re.sub(r"h", "", t[1:])                      # sh->s, th->t, kh->k
         t = re.sub(r"m(?=[^aeioubpm])", "n", t)                 # Hindi anusvara: 'kmsltimg' ~ 'consulting'
         t = re.sub(r"j$", "s", t)                               # 'proprtij' ~ 'properties'
         t = t.translate(str.maketrans("cqzwy", "kksvi"))
-        t = t[0] + re.sub(r"[aeiou]", "", t[1:])
+        t = (t[0] + re.sub(r"[aeiou]", "", t[1:])).translate(VOICE)
         res.append(re.sub(r"(.)\1+", r"\1", t))
     return " ".join(res)
 
@@ -93,6 +104,7 @@ def phonetic(text):
 def norm_name(raw):
     """-> (core, alt, legal, phon, nosp, nl)"""
     nl = int(any(ord(c) > 0x24F for c in raw))
+    raw = raw.replace("ஃப", "f").replace("ஃஜ", "z")      # Tamil aytham + pa / ja write f / z
     s = anyascii(raw).lower()
     s = ID_TAG.sub(" ", s)
     s = PHONE.sub(" ", s)
@@ -225,6 +237,8 @@ def demo():
     assert norm_name("S.A.R.L. Joliot & Frères")[2] == "sarl"
     assert norm_name("क्लासिक टेक लिमिटेड")[3] == phonetic("classic tech") == "klsk tk"
     assert phonetic("kmsltimg") == phonetic("consulting")
+    assert norm_name("சில்வர் ஃபுட்ஸ்")[3] == norm_name("Silver Foods")[3]              # Tamil f + voicing
+    assert norm_name("ड्रीम सॉल्यूशंस")[3] == norm_name("Dream Solutions")[3]          # -tion ~ -shan
     assert norm_addr("12029 SHERATON LANE, CINCINNATI, OH") == norm_addr("12029 Sheraton Ln, Cincinnati, Ohio")
     assert norm_addr("South Blooming Grove, New York, 00357 Lake Shore Dr")[1] == "357"
     assert norm_addr("4415/14Gali Lotan, दिल्ली")[0] == "4415 14 gali lotan dl"

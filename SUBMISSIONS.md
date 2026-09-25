@@ -12,4 +12,12 @@ probed on the public board; everything else is chosen on our own validation spli
 
 | # | date | uploaded by | file | sha256 (first 16) | code commit | rule | validation F0.5 | public LB F0.5 | notes |
 |---|------|-------------|------|-------------------|-------------|------|-----------------|----------------|-------|
-| 1 | 2026-09-25 | | matching_results.tsv | 486d3f430b1680f4 | 06b7ebd | threshold 0.725 | 0.9688 | | first full run |
+| 1 | 2026-09-25 14:28 IST | LycanAlan | matching_results.tsv | 486d3f430b1680f4 | 06b7ebd | threshold 0.725 | 0.9688 | 0.9570 | first full run |
+
+Upload tip (Windows): if the portal hangs at "Please Wait 0" / Bad Request, Windows has no
+MIME type for `.tsv`. Fix once per user, then fully restart the browser:
+`reg add "HKCU\Software\Classes\.tsv" /v "Content Type" /t REG_SZ /d "text/tab-separated-values" /f`
+
+Reading sub 1: test is 46.8% India / 38.3% US / 15.0% France (S1). Re-weighting our
+per-country validation (US 0.9793, India 0.9529) to that mix gives ~0.965 for US+India,
+which puts France at roughly 0.90 on the public split. France is the main gap.

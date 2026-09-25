@@ -16,6 +16,10 @@ Two retrieval directions, unioned:
             duplicates, so the owner is usually rank 1 (95% of the time).
   forward : every S1 record looks up its k most similar records per source,
             catching owners that a generic-looking S2/S3 record ranked lower.
+  combo   : every S2/S3 record looks up its k best S1 on "house number x name
+            sound" keys (see combo_keys). Built for India, where a name often
+            arrives in Kannada/Hindi script and ~48 S1 share the same generic
+            name: 33% of India's previously missed pairs are found this way.
 Measured on train (US): 97.9% of true pairs survive, ~20 candidates per S1.
 """
 import time
@@ -85,22 +89,33 @@ def unmatched_mass(X, a, b, chunk=2_000_000):
     return out
 
 
-def block_country(d, k_rev, k_fwd, prune, pool):
+def combo_keys(phon, nums):
+    """'house number x name sound' keys: '79_sftvr' = number 79 + skeleton of 'software'.
+    Kannada 'saaphttveer' and English 'software' share the skeleton, so the key links a
+    transliterated record to its S1 even when the words differ, and a number+name pair is rare."""
+    return [" ".join(f"{n}_{p}" for n in ns.split() for p in ps.split()) for ps, ns in zip(phon, nums)]
+
+
+def block_country(d, k_rev, k_fwd, prune, pool, k_combo=3):
     """d: normalised records of ONE country (all sources). Returns candidate
     pairs (q = S1 position, i = S2/S3 position in d) with TF-IDF features."""
     t = time.time()
+    src = d.src.to_numpy()
+    s1, pl = np.flatnonzero(src == 1), np.flatnonzero(src != 1)
+    if not len(s1) or not len(pl):
+        return None
+    K = tfidf(hashed_counts(combo_keys(d.phon.tolist(), d.nums.tolist()), pool))
+    q, i, r = topk(prune_common(K[pl], prune), K[s1], k_combo)
+    parts = [pd.DataFrame({"q": s1[i], "i": pl[q], "rank_combo": r})]
+
     names = (d.core + " " + d.alt).str.strip().tolist()
     addrs = [" ".join("@" + w for w in s.split()) for s in d.addr.tolist()]   # "@": address terms never collide with name terms
     Xn, Xa = hashed_counts(names, pool), hashed_counts(addrs, pool)
     W, Nw, Aw = tfidf(Xn + Xa), tfidf(Xn), tfidf(Xa)
     del Xn, Xa, names, addrs
-    src = d.src.to_numpy()
-    s1, pl = np.flatnonzero(src == 1), np.flatnonzero(src != 1)
-    if not len(s1) or not len(pl):
-        return None
 
     q, i, r = topk(prune_common(W[pl], prune), W[s1], k_rev)
-    parts = [pd.DataFrame({"q": s1[i], "i": pl[q], "rank_rev": r})]
+    parts.append(pd.DataFrame({"q": s1[i], "i": pl[q], "rank_rev": r}))
     Wq = prune_common(W[s1], prune)
     for s in (2, 3):
         ps = np.flatnonzero(src == s)
@@ -110,8 +125,11 @@ def block_country(d, k_rev, k_fwd, prune, pool):
     c = pd.concat(parts, ignore_index=True).groupby(["q", "i"], sort=False).min().reset_index()
     c["rank_rev"] = c.rank_rev.fillna(k_rev + 1)                   # k+1 = "not retrieved this way"
     c["rank_fwd"] = c.rank_fwd.fillna(k_fwd + 1)
+    c["rank_combo"] = c.rank_combo.fillna(k_combo + 1)
     q, i = c.q.to_numpy(), c.i.to_numpy()
     c["src"] = src[i].astype(np.int8)
+    c["cos_k"] = rowdot(K, q, i)
+    del K
     c["cos_w"] = rowdot(W, q, i)
     c["cos_nw"] = rowdot(Nw, q, i)
     c["cos_aw"] = rowdot(Aw, q, i)
@@ -125,7 +143,7 @@ def block_country(d, k_rev, k_fwd, prune, pool):
 
 def add_context(c):
     """Where does this pair stand among its competitors?"""
-    for col in ("cos_w", "cos_nw", "cos_aw"):
+    for col in ("cos_w", "cos_nw", "cos_aw", "cos_k"):
         g = c.groupby(["q", "src"])[col]
         c[f"{col}_gap"] = g.transform("max") - c[col]              # distance to this S1's best candidate
         c[f"{col}_rk"] = g.rank(ascending=False, method="min").astype(np.float32)

@@ -32,6 +32,10 @@ LEGAL = {
     "snc": "snc", "ei": "ei", "scop": "scop", "selarl": "selarl",
 }
 FILLER = {"the", "and", "of", "mr", "mrs", "ms", "messrs", "de", "du", "des", "la", "le", "les", "l", "d", "et"}
+# Prefixes the S2/S3 noise adds to ~8% of India names (~55k records each); only 65 India S1 names
+# start with one, so they are stripped at position 0 only ("Dr Smt Rama Traders" -> "rama traders").
+HONORIFIC = {"smt", "shri", "sri", "dr", "mr", "mrs", "ms"}
+M_S = re.compile(r"\bm\s*/\s*s\b\.?")                            # "M/s ABC Traders" (messrs)
 NAME_SYN = {"etablissements": "ets", "etablissement": "ets", "societe": "ste"}
 ALIAS = re.compile(r"\b(?:formerly known as|also known as|doing business as|trading as|formerly|"
                    r"f/k/a|fka|nee|a/k/a|aka|d/b/a|dba|t/a)\b")
@@ -45,8 +49,15 @@ NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
 
 def _deleet(tok):
-    # "br0thers", "c0astal" -> letters. Digits at a word edge stay: "24hr", "7eleven", "8th" are real.
-    return INNER_DIGIT.sub(lambda m: LEET[m.group(0)], tok)
+    # "br0thers", "c0astal" -> letters. One digit at the edge of an otherwise alphabetic word of
+    # 4+ chars is leet too: "denta1", "5ervices", "6roup" (~100k S2/S3 tokens). "24hr", "8th" stay.
+    tok = INNER_DIGIT.sub(lambda m: LEET[m.group(0)], tok)
+    if len(tok) >= 4:
+        if tok[0] in LEET and tok[1:].isalpha():
+            tok = LEET[tok[0]] + tok[1:]
+        elif tok[-1] in LEET and tok[:-1].isalpha():
+            tok = tok[:-1] + LEET[tok[-1]]
+    return tok
 
 
 def _name_tokens(s):
@@ -85,6 +96,7 @@ def norm_name(raw):
     s = anyascii(raw).lower()
     s = ID_TAG.sub(" ", s)
     s = PHONE.sub(" ", s)
+    s = CARE_OF.sub(" ", M_S.sub(" ", s))                           # "M/s X", "S/O X" left stray "m s" tokens
     stems = [m.group(2) for m in URL.finditer(s)]
     # "Name | www.x.com" is appended noise -> drop it; a bare "metrocomponents.com" IS the name -> keep the stem
     s = URL.sub(lambda m: " " if m.group(1) else " " + m.group(2) + " ", s).replace("|", " ")
@@ -97,6 +109,8 @@ def norm_name(raw):
 
     def core_legal(x):
         toks = _name_tokens(x)
+        while len(toks) > 1 and toks[0] in HONORIFIC:
+            toks = toks[1:]
         legal = {LEGAL[t] for t in toks if t in LEGAL}
         core = [t for t in toks if t not in LEGAL and t not in FILLER]
         return core, legal
@@ -129,7 +143,7 @@ IN_STATES = {
     "andhra pradesh": "ap", "amdhrprdes": "ap", "arunachal pradesh": "arp", "assam": "as",
     "bihar": "br", "chhattisgarh": "cg", "goa": "goa", "gujarat": "gj", "gujrat": "gj",
     "haryana": "hr", "hriyana": "hr", "himachal pradesh": "hp", "jharkhand": "jh",
-    "karnataka": "ka", "krnatk": "ka", "kerala": "kl", "kerlm": "kl", "madhya pradesh": "mp",
+    "karnataka": "ka", "krnatk": "ka", "kerala": "kl", "kerlm": "kl", "keralam": "kl", "madhya pradesh": "mp",
     "mdhy prdes": "mp", "maharashtra": "mh", "mharastr": "mh", "manipur": "mn", "meghalaya": "ml",
     "mizoram": "mz", "nagaland": "nl", "odisha": "od", "orissa": "od", "od isa": "od",
     "punjab": "pb", "pmjab": "pb", "rajasthan": "rj", "rajsthan": "rj", "sikkim": "sk",
@@ -157,12 +171,18 @@ ABBR = {
     "faubourg": "fbg", "near": "nr", "opposite": "opp", "building": "bldg", "floor": "fl",
     "flr": "fl", "sector": "sec", "extension": "extn", "ext": "extn", "district": "dist",
     "apartment": "apt", "apartments": "apt", "apts": "apt",
+    # measured swaps between S1 and its true match (train) / confident test pairs (France)
+    "bombay": "mumbai", "calcutta": "kolkata", "madras": "chennai", "bengaluru": "bangalore",
+    "bis": "b", "t": "ter", "q": "quai", "crs": "cours", "res": "residence", "psg": "passage",
+    "pass": "passage", "appartement": "apt", "appt": "apt", "app": "apt", "alle": "all",
     "first": "1", "second": "2", "third": "3", "fourth": "4", "fifth": "5", "sixth": "6",
     "seventh": "7", "eighth": "8", "ninth": "9", "tenth": "10", "eleventh": "11", "twelfth": "12",
     "thirteenth": "13", "fourteenth": "14", "fifteenth": "15",
 }
 ADDR_DROP = {"null", "none", "no", "nos", "number", "ndeg", "hno", "house", "plot", "shop",
-             "door", "flat", "unit", "pmb"}
+             "door", "flat", "unit", "pmb",
+             # place TYPE words, one-sided in 12.6k true pairs ("cdp" never appears in S1 at all)
+             "city", "township", "twp", "county", "cdp", "town", "village", "of"}
 CARE_OF = re.compile(r"\b[cswd]\s*/\s*o\b")                    # c/o, s/o, w/o, d/o ("care of", "son of" ...)
 
 
@@ -221,8 +241,15 @@ def demo():
     assert norm_addr("45 Washington Street, Methuen, MA")[0] == "45 washington st methuen ma"
     assert norm_addr("5 Rue du Nord, Lille, Nord")[0] == "5 rue du nord lille hdf"
     assert norm_addr("S/O Ramesh Kumar, Delhi")[0] == "ramesh kumar dl"
-    assert norm_addr("118 O Street, Salt Lake City, UT")[0] == "118 o st salt lake city ut"
+    assert norm_addr("118 O Street, Salt Lake City, UT")[0] == "118 o st salt lake ut"
     assert norm_addr("Pune, Maharashtra 411001") == ("pune mh 411001", "411001")
+    # audit round 2 (measured on train true pairs / confident France test pairs)
+    assert norm_name("M/s Smt Denta1 5ervices")[0] == norm_name("Dental Services")[0] == "dental services"
+    assert norm_name("Sri")[0] == "sri"                                          # a lone word is the name
+    assert norm_addr("SAINT ANNE CITY, IL")[0] == norm_addr("St Anne, Illinois")[0]
+    assert norm_addr("5 bis Quai X, Keralam")[0] == norm_addr("5B Q X, Kerala")[0] == "5 b quai x kl"
+    assert norm_addr("12 Oak Terrace")[0] == norm_addr("12 OAK TER")[0] == "12 oak ter"
+    assert norm_addr("12t Rue X")[0] == norm_addr("12 ter Rue X")[0] == "12 ter rue x"
     print("normalize.demo OK")
 
 

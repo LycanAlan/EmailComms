@@ -23,12 +23,12 @@ what to do with missing values.
 import numpy as np
 import pandas as pd
 from rapidfuzz import fuzz, process
-from rapidfuzz.distance import JaroWinkler
+from rapidfuzz.distance import JaroWinkler, Levenshtein
 
 import fingerprints
 
 NAN = np.float32(np.nan)
-VERSION = 5          # bump when the feature set changes: cached feature tables carry it in their file name
+VERSION = 7          # bump when the feature set changes: cached feature tables carry it in their file name
 
 
 def _sim(a, b, scorer):
@@ -37,9 +37,53 @@ def _sim(a, b, scorer):
     return s
 
 
+def prefix_cover(word, toks):
+    """Is `word` the tokens' prefixes glued together, in order, every token used?
+    'keindia' <- kashvi electricals india, 'firstyhn' <- first yhn: how website handles are made."""
+    n, m = len(word), len(toks)
+    ok = [[False] * (m + 1) for _ in range(n + 1)]                 # ok[p][t]: word[:p] built from toks[:t]
+    ok[0][0] = True
+    for t in range(m):
+        tok = toks[t]
+        for p in range(n):
+            if ok[p][t]:
+                L = 1
+                while L <= len(tok) and p + L <= n and word[p + L - 1] == tok[L - 1]:
+                    ok[p + L][t + 1] = True
+                    L += 1
+    return ok[n][m]
+
+
+def handle_features(ca, cb):
+    """1 if one side is a single word spelled from the other side's 2..6 words, 0 if not, NaN if n/a.
+    Long words: prefixes glued together (website handles). Short words (2-4 letters): exactly the
+    initials ('pa' <- phare amicale, 'ws' <- women sportive: seen on France's same-address copies)."""
+    out = np.full(len(ca), NAN, np.float32)
+    for j, (x, y) in enumerate(zip(ca, cb)):
+        if not x or not y or x == y:
+            continue
+        tx, ty = x.split(), y.split()
+        if len(tx) == 1 and 2 <= len(ty) <= 6:
+            w, toks = x, ty
+        elif len(ty) == 1 and 2 <= len(tx) <= 6:
+            w, toks = y, tx
+        else:
+            continue
+        if len(w) < 5:
+            if len(w) >= 2:
+                out[j] = w == "".join(t[0] for t in toks)
+            continue
+        hit = prefix_cover(w, toks)
+        for tld in ("com", "in", "net", "org"):                    # 'reedcrockerchurchcom': the dot was lost
+            if not hit and w.endswith(tld) and len(w) > len(tld) + 3:
+                hit = prefix_cover(w[:-len(tld)], toks)
+        out[j] = hit
+    return out
+
+
 def number_features(na, nb):
     """na, nb: space-separated number strings (house/plot/zip...) of each side."""
-    out = np.full((len(na), 8), NAN, np.float32)
+    out = np.full((len(na), 10), NAN, np.float32)
     for j, (x, y) in enumerate(zip(na, nb)):
         if not x or not y:
             continue                                               # missing side -> NaN, LightGBM handles it
@@ -56,9 +100,12 @@ def number_features(na, nb):
                     trunc = 1.0                                    # 6100 vs 100: dropped digit -> typical noise
                 if len(u) < 10 and len(v) < 10:
                     diff = min(diff, abs(int(u) - int(v))) if diff is not None else abs(int(u) - int(v))
-        out[j] = (A[0] == B[0], common, common / len(sa | sb), len(ua), len(ub), trunc,
+        a0, b0 = A[0], B[0]
+        out[j] = (a0 == b0, common, common / len(sa | sb), len(ua), len(ub), trunc,
                   diff is not None and diff <= 20,                 # 20999 vs 20996: typical decoy
-                  np.log1p(diff) if diff is not None else NAN)
+                  np.log1p(diff) if diff is not None else NAN,
+                  Levenshtein.distance(a0, b0),                    # first (house) number: digit edits, 502 -> 501 = 1
+                  a0 != b0 and sorted(a0) == sorted(b0))           # swapped digits, 18 -> 81
     return out
 
 
@@ -86,6 +133,7 @@ def pair_features(c, norm):
     f["n_first_eq"] = np.array([x.split()[0] == y.split()[0] if x and y else NAN for x, y in zip(ca, cb)], np.float32)
     f["n_len_a"] = np.array([x.count(" ") + bool(x) for x in ca], np.float32)
     f["n_len_b"] = np.array([x.count(" ") + bool(x) for x in cb], np.float32)
+    f["n_handle"] = handle_features(ca, cb)
     aa, ab = A("alt"), B("alt")
     f["n_alias"] = np.fmax(np.fmax(_sim(ca, ab, fuzz.token_set_ratio),
                                    _sim(aa, cb, fuzz.token_set_ratio)),
@@ -114,7 +162,7 @@ def pair_features(c, norm):
     ua, ub = A("nums"), B("nums")
     nf = number_features(ua, ub)
     for k, name in enumerate(["num_first_eq", "num_common", "num_jacc", "num_only_a", "num_only_b",
-                              "num_trunc", "num_near", "num_logdiff"]):
+                              "num_trunc", "num_near", "num_logdiff", "num0_lev", "num0_swap"]):
         f[name] = nf[:, k]
     f["num_digits"] = _sim([x.replace(" ", "") for x in ua], [y.replace(" ", "") for y in ub], fuzz.ratio)
     return fingerprints.pair_extras(f, norm, q, i)
@@ -130,6 +178,11 @@ def demo():
     assert nf[0, 5] == 0 and nf[0, 6] == 0, nf[0]                 # single digits ("1/2") never count as near/trunc
     s = _sim(["abc", "", "x"], ["abc", "", ""], fuzz.ratio)
     assert s[0] == 100 and np.isnan(s[1]) and np.isnan(s[2])      # empty -> NaN, never a fake 100
+    nf = number_features(["18 5", "502"], ["81 5", "501"])
+    assert nf[0, 9] == 1 and nf[1, 8] == 1 and nf[1, 9] == 0, nf        # swapped digits / one digit edit
+    h = handle_features(["keindia", "firstyhn", "reedcrockerchurchcom", "acme", "zzzzzz"],
+                        ["kashvi electricals india", "first yhn", "reed crocker church", "acme co", "first yhn"])
+    assert h[0] == 1 and h[1] == 1 and h[2] == 1 and h[3] == 0 and h[4] == 0, h          # "acme" is not the initials of "acme co"
     lg = legal_features(["llp", "ltd", "", "co inc"], ["ltd", "ltd", "llc", "inc"])
     assert lg[0, 3] == 1 and lg[1, 2] == 1 and lg[2, 3] == 0 and lg[3, 2] == 1
     print("features.demo OK")

@@ -37,7 +37,7 @@ RX = {  # RE2 patterns on the RAW strings, run in Arrow's C++ layer
     "alead": ("addr", r"^\W"),
 }
 FLAG_COLS = [f"fp_{k}" for k in RX] + ["fp_ntok", "fp_nlen", "fp_alen", "fp_acomma"]
-AMB_COLS = ["amb_core", "amb_phon", "oov_share", "oov_n", "tw_sound", "tw_addr", "tw_name"]
+AMB_COLS = ["amb_core", "amb_phon", "oov_share", "oov_n", "tw_sound", "tw_addr", "tw_name", "addr_code", "amb_addr"]
 
 
 def raw_flags(name, addr):
@@ -93,6 +93,16 @@ def ambiguity(norm):
     out["tw_sound"] = np.where(has("phon") & has("nums"), twins("phon", "nums"), np.nan)
     out["tw_addr"] = np.where(has("addr"), twins("addr"), np.nan)
     out["tw_name"] = np.where(has("core"), twins("core"), np.nan)
+    # Exact address, order-free ("calais 57 rue x" = "57 rue x calais"), only when it holds a number: how many
+    # S1 of the country sit at it. France's streets are dense and its names generic, so an exact, unique
+    # address match is the decisive signal there; on train such pairs are 96% true even when the names
+    # share nothing, yet France test pairs like that scored 0.74 on average (US/India: 0.98).
+    key = [" ".join(sorted(set(a.split()))) if n else "" for a, n in zip(norm.addr.astype(str), norm.nums.astype(str))]
+    k = pc.binary_join_element_wise(cty, pa.array(key, pa.large_string()), pa.scalar("|", pa.large_string()))
+    codes = pc.dictionary_encode(k).indices.to_numpy()
+    empty = np.array([not x for x in key])
+    out["addr_code"] = np.where(empty, np.nan, codes).astype(np.float64)
+    out["amb_addr"] = np.where(empty, np.nan, np.bincount(codes[src == 1], minlength=codes.max() + 1)[codes]).astype(np.float32)
     return pd.DataFrame(out)
 
 
@@ -114,6 +124,10 @@ def pair_extras(f, norm, q, i):
     for k in ("tw_sound", "tw_addr", "tw_name"):
         f[f"{k}_i"] = col(k)[i]
     f["tw_sound_q"] = col("tw_sound")[q]                                   # S2/S3 records carrying the S1's exact sound + numbers
+    ca, cb = col("addr_code")[q], col("addr_code")[i]
+    f["a_exact"] = np.where(np.isnan(ca) | np.isnan(cb), np.nan, ca == cb).astype(np.float32)
+    f["amb_addr_q"] = col("amb_addr")[q]                                   # S1 entities at the S1's own address
+    f["amb_addr_i"] = col("amb_addr")[i]                                   # S1 entities at the candidate's address
     return f
 
 
@@ -131,6 +145,11 @@ def demo():
     assert A.amb_core.tolist() == [2, 2, 2, 0] and A.oov_share.tolist() == [0, 0, 0, 1]
     assert A.tw_name.tolist() == [1, 1, 0, 0]                            # the one S2 named 'hays furniture'; itself excluded
     assert A.tw_sound.tolist()[:3] == [1, 0, 0] and np.isnan(A.tw_sound[3]) and np.isnan(A.tw_addr[3])
+    assert A.amb_addr.tolist()[:3] == [1, 1, 1] and np.isnan(A.amb_addr[3])
+    assert A.addr_code[0] == A.addr_code[2] != A.addr_code[1]
+    B = ambiguity(pd.DataFrame({"src": np.int8([1, 2]), "country": ["France"] * 2, "core": ["a", "b"], "phon": ["a", "b"],
+                                "addr": ["57 rue x calais", "calais 57 rue x"], "nums": ["57", "57"]}))
+    assert B.addr_code[0] == B.addr_code[1] and B.amb_addr.tolist() == [1, 1]   # component order does not matter
     print("fingerprints.demo OK")
 
 

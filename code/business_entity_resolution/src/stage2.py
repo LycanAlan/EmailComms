@@ -27,6 +27,10 @@ FEATS = ["p", "p2", "m", "n_q", "n_conf_q", "sum_p_q", "rank_q", "max_other_q", 
 PARAMS = dict(objective="binary", learning_rate=0.05, num_leaves=31, min_data_in_leaf=100, feature_fraction=0.9,
               num_threads=8, verbose=-1, seed=0)
 ROUNDS = 400
+# Stage 2 learns from only the ~230k owned pairs of the 50k tune S1, so its variance matters: three bagged
+# seeds, averaged, gave +0.0002 / +0.0003 out-of-fold on two different stage-1 runs.
+BAG = dict(bagging_fraction=0.8, bagging_freq=1, feature_fraction=0.8)
+SEEDS = (0, 1, 2)
 
 
 def twin_keys(norm_path):
@@ -77,6 +81,16 @@ def fit_model(d):
     return lgb.train(PARAMS, lgb.Dataset(d[FEATS].to_numpy(np.float32), d.y.to_numpy(np.float32)), ROUNDS)
 
 
+def fit_bag(d):
+    ds = lgb.Dataset(d[FEATS].to_numpy(np.float32), d.y.to_numpy(np.float32), free_raw_data=False)
+    return [lgb.train({**PARAMS, **BAG, "seed": s}, ds, ROUNDS) for s in SEEDS]
+
+
+def predict_bag(models, d):
+    X = d[FEATS].to_numpy(np.float32)
+    return np.mean([m.predict(X) for m in models], 0)
+
+
 def tune_rows_and_truth(work, data, train_s1=300_000, valid_s1=100_000):
     """The pipeline's tune S1 rows (same seed/split as cmd_train) and n_true per S1 row."""
     ids = pq.read_table(work / "train_norm.parquet", columns=["id"])["id"].to_numpy(zero_copy_only=False)
@@ -97,14 +111,17 @@ def cmd_fit(a):
     fold = (pd.util.hash_array(ev.q.to_numpy().astype(np.int64)) % 2).astype(int)
     ev["p_s2"] = np.nan
     for k in (0, 1):
-        ev.loc[fold == k, "p_s2"] = fit_model(ev[fold != k]).predict(ev.loc[fold == k, FEATS].to_numpy(np.float32))
+        ev.loc[fold == k, "p_s2"] = predict_bag(fit_bag(ev[fold != k]), ev.loc[fold == k])
     score = lambda col, t, m=0.0: matcher.macro_f05(ev[(ev[col] >= t) & (ev.p - ev.p2 >= m)], tune_q, n_true)
     s1 = max((score("p", t, m), t, m) for t in np.arange(0.4, 0.96, 0.025) for m in (0.0, 0.2, 0.4, 0.6))
     s2 = max((score("p_s2", t), t) for t in np.arange(0.3, 0.96, 0.025))
     print(f"stage 1 alone: {s1[0]:.4f} (t={s1[1]:.3f}, margin={s1[2]}) | stage 2 out-of-fold: {s2[0]:.4f} (t={s2[1]:.3f})", flush=True)
     out = a.work / "stage2"
     out.mkdir(exist_ok=True)
-    fit_model(ev).save_model(str(out / "model.txt"))
+    for old in out.glob("model*.txt"):
+        old.unlink()
+    for k, m in enumerate(fit_bag(ev)):
+        m.save_model(str(out / ("model.txt" if k == 0 else f"model_{k}.txt")))
     json.dump({"t": float(s2[1]), "oof": float(s2[0]), "stage1": float(s1[0]), "use": bool(s2[0] > s1[0])}, open(out / "rule.json", "w"))
     print(f"saved {out}", flush=True)
 
@@ -117,7 +134,8 @@ def cmd_apply(a):
         return
     own = matcher.one_owner(pd.read_parquet(a.work / "test_scored.parquet"))
     features(own, twin_keys(a.work / "test_norm.parquet"))
-    own["p_s2"] = lgb.Booster(model_file=str(a.work / "stage2" / "model.txt")).predict(own[FEATS].to_numpy(np.float32))
+    files = sorted((a.work / "stage2").glob("model*.txt"))             # model.txt, model_1.txt, ...: averaged
+    own["p_s2"] = predict_bag([lgb.Booster(model_file=str(f)) for f in files], own)
     picked = own[own.p_s2 >= rule["t"]]
     t = pq.read_table(a.work / "test_norm.parquet", columns=["id", "src"])
     ids, s1_rows = t["id"].to_numpy(zero_copy_only=False), np.flatnonzero(t["src"].to_numpy() == 1)

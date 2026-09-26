@@ -39,6 +39,9 @@ def fit(tr, va, rounds=2000):
 
 
 def predict(m, f):
+    """m: one model, or a list of models (their probabilities are averaged)."""
+    if isinstance(m, list):
+        return np.mean([predict(x, f) for x in m], 0).astype(np.float32)
     return m.predict(f[m.feature_name()].to_numpy(np.float32), num_threads=8).astype(np.float32)
 
 
@@ -99,13 +102,22 @@ def tune_decision(owned, s1_rows, n_true):
 
 
 def save(model, rule, path):
+    """model: one model or a list (lgb.txt, lgb_1.txt, ...: averaged at prediction time)."""
+    models = model if isinstance(model, list) else [model]
     path.mkdir(parents=True, exist_ok=True)
-    model.save_model(str(path / "lgb.txt"))
+    for old in path.glob("lgb_*.txt"):
+        old.unlink()
+    for k, m in enumerate(models):
+        m.save_model(str(path / ("lgb.txt" if k == 0 else f"lgb_{k}.txt")))
     (path / "rule.json").write_text(json.dumps(rule))
 
 
 def load(path):
-    return lgb.Booster(model_file=str(path / "lgb.txt")), json.loads((path / "rule.json").read_text())
+    """-> (model or list of models, rule)."""
+    models = [lgb.Booster(model_file=str(path / "lgb.txt"))]
+    while (path / f"lgb_{len(models)}.txt").exists():
+        models.append(lgb.Booster(model_file=str(path / f"lgb_{len(models)}.txt")))
+    return (models if len(models) > 1 else models[0]), json.loads((path / "rule.json").read_text())
 
 
 def demo():

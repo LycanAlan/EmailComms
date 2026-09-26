@@ -22,6 +22,8 @@ our own validation split.
 | 6 | 2026-09-26 ~12:00 IST | LycanAlan | v4s2/matching_results.tsv | 6c630170bd480983 | 0a0579c (v4 + stage 2) | stage 2, threshold 0.675 | 0.9807 (stage-2 out-of-fold) | 0.96795 | v4 = v3 + house-number x address-word channel (France fix); France read-out ~0.906 if US/India on test = validation |
 | 7 | 2026-09-26 ~12:05 IST | LycanAlan | v6s2/matching_results.tsv | 4649b37999b944e3 | 5f438a0 + 0a0579c | stage 2, threshold 0.675 | 0.9819 (India 0.9762, US 0.9857) | 0.96445 | v6 = v4 + twin features + phonetic fixes; France read-out ~0.874 |
 | 8 | 2026-09-26 ~12:25 IST | LycanAlan | r4_night/matching_results.tsv | 10f7be5155dce48e | 2a930eb (night-raghav, Ragh234) | 3-model ensemble, bagged stage 2 | 0.9832 (India 0.9782, US 0.9865) | 0.965992 | v6 + character/twin retrieval, handle/number/address features; France read-out ~0.876 |
+| 9 | 2026-09-26 ~16:10 IST | LycanAlan | h1_r4usin_v3fr/matching_results.tsv | 0a6f0462cbfbe8d1 | sub 8 US/India + sub 5 France | - | - | 0.964911 | diagnostic: France from v3 LOWERS the score, so France was not the problem; US/India on test ~0.009 below validation |
+| 10 | 2026-09-26 ~22:15 IST | LycanAlan | ce1/matching_results.tsv | 78e44f17027a396e | v6 + xlm-roberta-base cross-encoder (Kaggle) | blend of logits (v6 p, cross-encoder), t 0.35, margin 0.2; unlabelled-country house-number rule | 0.9854 (India 0.9815, US 0.9879) | **0.977906** | best so far; France read-out ~0.941 if US/India on test = validation |
 
 Upload tip (Windows): if the portal hangs at "Please Wait 0" / Bad Request, Windows has no
 MIME type for `.tsv`. Fix once per user, then fully restart the browser:
@@ -48,3 +50,9 @@ validation. Test facts: 13.9% of French S1 share an exact address with another S
 India 6.1%, train 6-7%), so address-based channels and twin/address features see a France
 far outside training; test US is sparser than train US (name shared by another S1: 29% vs 36%).
 Next: a hybrid file (US/India from sub 8, France from sub 5) separates the two.
+
+Reading subs 9-10: test has ~2x the non-matching records per S1 (5.8 vs 4.7) and 2.4x the S1 with a
+nearby-house-number candidate; dataset-count features, the 'margin over next-best S1' features and stage 2
+over-state test performance. A labelled pseudo-test built from train (test-like density + synthetic
+nearby-number decoys) reproduces the gap (validation 0.9819 -> 0.9708) and ranks stage 2 below stage 1.
+A text model judging each pair on content (cross-encoder) transfers: sub 10 = +0.0082 over sub 5.
